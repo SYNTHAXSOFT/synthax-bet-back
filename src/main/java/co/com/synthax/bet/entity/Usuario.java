@@ -1,8 +1,8 @@
-package co.com.synthax.pos.entity;
+package co.com.synthax.bet.entity;
 
 import com.fasterxml.jackson.annotation.JsonIgnoreProperties;
 
-import co.com.synthax.pos.enums.Rol;
+import co.com.synthax.bet.enums.Rol;
 import jakarta.persistence.*;
 import jakarta.validation.constraints.Email;
 import jakarta.validation.constraints.NotBlank;

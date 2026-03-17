@@ -1,4 +1,4 @@
-package co.com.synthax.pos.controller;
+package co.com.synthax.bet.controller;
 
 import java.util.HashMap;
 import java.util.List;
@@ -17,8 +17,8 @@ import org.springframework.web.bind.annotation.RequestBody;
 import org.springframework.web.bind.annotation.RequestMapping;
 import org.springframework.web.bind.annotation.RestController;
 
-import co.com.synthax.pos.entity.Municipio;
-import co.com.synthax.pos.service.MunicipioService;
+import co.com.synthax.bet.entity.Municipio;
+import co.com.synthax.bet.service.MunicipioService;
 import jakarta.validation.Valid;
 import lombok.RequiredArgsConstructor;
 

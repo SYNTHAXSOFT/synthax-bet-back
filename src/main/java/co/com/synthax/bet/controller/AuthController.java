@@ -1,10 +1,10 @@
-package co.com.synthax.pos.controller;
+package co.com.synthax.bet.controller;
 
-import co.com.synthax.pos.dto.LoginRequest;
-import co.com.synthax.pos.dto.LoginResponse;
-import co.com.synthax.pos.entity.Usuario;
-import co.com.synthax.pos.service.JwtService;
-import co.com.synthax.pos.service.UsuarioService;
+import co.com.synthax.bet.dto.LoginRequest;
+import co.com.synthax.bet.dto.LoginResponse;
+import co.com.synthax.bet.entity.Usuario;
+import co.com.synthax.bet.service.JwtService;
+import co.com.synthax.bet.service.UsuarioService;
 import lombok.RequiredArgsConstructor;
 import org.springframework.http.HttpStatus;
 import org.springframework.http.ResponseEntity;

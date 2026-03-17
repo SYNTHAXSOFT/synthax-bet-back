@@ -1,4 +1,4 @@
-package co.com.synthax.pos.service;
+package co.com.synthax.bet.service;
 
 import io.jsonwebtoken.Claims;
 import io.jsonwebtoken.Jwts;
@@ -6,7 +6,7 @@ import io.jsonwebtoken.security.Keys;
 import org.springframework.beans.factory.annotation.Value;
 import org.springframework.stereotype.Service;
 
-import co.com.synthax.pos.entity.Usuario;
+import co.com.synthax.bet.entity.Usuario;
 
 import java.util.Date;
 import java.util.function.Function;

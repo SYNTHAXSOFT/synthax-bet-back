@@ -1,7 +1,7 @@
-package co.com.synthax.pos.service;
+package co.com.synthax.bet.service;
 
-import co.com.synthax.pos.entity.Departamento;
-import co.com.synthax.pos.repository.DepartamentoRepository;
+import co.com.synthax.bet.entity.Departamento;
+import co.com.synthax.bet.repository.DepartamentoRepository;
 import lombok.RequiredArgsConstructor;
 import org.springframework.stereotype.Service;
 

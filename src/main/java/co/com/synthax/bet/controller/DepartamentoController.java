@@ -1,7 +1,7 @@
-package co.com.synthax.pos.controller;
+package co.com.synthax.bet.controller;
 
-import co.com.synthax.pos.entity.Departamento;
-import co.com.synthax.pos.service.DepartamentoService;
+import co.com.synthax.bet.entity.Departamento;
+import co.com.synthax.bet.service.DepartamentoService;
 import jakarta.validation.Valid;
 import lombok.RequiredArgsConstructor;
 import org.springframework.http.HttpStatus;

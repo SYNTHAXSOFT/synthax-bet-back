@@ -1,4 +1,4 @@
-package co.com.synthax.pos.entity;
+package co.com.synthax.bet.entity;
 
 import com.fasterxml.jackson.annotation.JsonIgnoreProperties;
 import jakarta.persistence.*;

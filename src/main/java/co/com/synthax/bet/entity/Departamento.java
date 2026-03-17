@@ -1,4 +1,4 @@
-package co.com.synthax.pos.entity;
+package co.com.synthax.bet.entity;
 
 import jakarta.persistence.*;
 import jakarta.validation.constraints.NotBlank;

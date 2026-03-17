@@ -1,10 +1,10 @@
-package co.com.synthax.pos.service;
+package co.com.synthax.bet.service;
 
-import co.com.synthax.pos.entity.Departamento;
-import co.com.synthax.pos.entity.Municipio;
-import co.com.synthax.pos.entity.Usuario;
-import co.com.synthax.pos.enums.Rol;
-import co.com.synthax.pos.repository.UsuarioRepository;
+import co.com.synthax.bet.entity.Departamento;
+import co.com.synthax.bet.entity.Municipio;
+import co.com.synthax.bet.entity.Usuario;
+import co.com.synthax.bet.enums.Rol;
+import co.com.synthax.bet.repository.UsuarioRepository;
 import lombok.RequiredArgsConstructor;
 import org.springframework.stereotype.Service;
 import java.util.List;

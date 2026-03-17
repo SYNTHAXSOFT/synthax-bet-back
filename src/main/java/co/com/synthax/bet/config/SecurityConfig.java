@@ -1,4 +1,4 @@
-package co.com.synthax.pos.config;
+package co.com.synthax.bet.config;
 
 import lombok.RequiredArgsConstructor;
 import org.springframework.context.annotation.Bean;

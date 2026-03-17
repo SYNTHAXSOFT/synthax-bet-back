@@ -1,8 +1,8 @@
-package co.com.synthax.pos.service;
+package co.com.synthax.bet.service;
 
-import co.com.synthax.pos.entity.Departamento;
-import co.com.synthax.pos.entity.Municipio;
-import co.com.synthax.pos.repository.MunicipioRepository;
+import co.com.synthax.bet.entity.Departamento;
+import co.com.synthax.bet.entity.Municipio;
+import co.com.synthax.bet.repository.MunicipioRepository;
 import lombok.RequiredArgsConstructor;
 import org.springframework.stereotype.Service;
 

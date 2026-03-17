@@ -1,8 +1,8 @@
-package co.com.synthax.pos.config;
+package co.com.synthax.bet.config;
 
-import co.com.synthax.pos.entity.Usuario;
-import co.com.synthax.pos.service.JwtService;
-import co.com.synthax.pos.service.UsuarioService;
+import co.com.synthax.bet.entity.Usuario;
+import co.com.synthax.bet.service.JwtService;
+import co.com.synthax.bet.service.UsuarioService;
 import jakarta.servlet.FilterChain;
 import jakarta.servlet.ServletException;
 import jakarta.servlet.http.HttpServletRequest;

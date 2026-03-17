@@ -1,7 +1,7 @@
-package co.com.synthax.pos.controller;
+package co.com.synthax.bet.controller;
 
-import co.com.synthax.pos.entity.Usuario;
-import co.com.synthax.pos.service.UsuarioService;
+import co.com.synthax.bet.entity.Usuario;
+import co.com.synthax.bet.service.UsuarioService;
 import jakarta.validation.Valid;
 import lombok.RequiredArgsConstructor;
 import org.springframework.http.HttpStatus;

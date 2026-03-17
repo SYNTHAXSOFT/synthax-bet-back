@@ -1,6 +1,6 @@
-package co.com.synthax.pos.dto;
+package co.com.synthax.bet.dto;
 
-import co.com.synthax.pos.entity.Usuario;
+import co.com.synthax.bet.entity.Usuario;
 import lombok.Data;
 
 @Data

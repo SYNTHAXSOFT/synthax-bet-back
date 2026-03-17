@@ -1,7 +1,8 @@
-package co.com.synthax.pos.repository;
+package co.com.synthax.bet.repository;
 
-import co.com.synthax.pos.entity.Usuario;
-import co.com.synthax.pos.enums.Rol;
+import co.com.synthax.bet.entity.Usuario;
+import co.com.synthax.bet.enums.Rol;
+
 import org.springframework.data.jpa.repository.JpaRepository;
 import org.springframework.stereotype.Repository;
 

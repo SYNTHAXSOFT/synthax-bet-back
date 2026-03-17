@@ -1,4 +1,4 @@
-package co.com.synthax.pos;
+package co.com.synthax.bet;
 
 import org.springframework.boot.SpringApplication;
 import org.springframework.boot.autoconfigure.SpringBootApplication;
