@@ -24,8 +24,7 @@ public class AuthController {
     @PostMapping("/login")
     public ResponseEntity<?> login(@RequestBody LoginRequest request) {
         try {
-            // CAMBIO: usar cedula en lugar de email
-            Usuario usuario = usuarioService.autenticarPorCedula(request.getCedula(), request.getPassword());
+            Usuario usuario = usuarioService.autenticar(request.getEmail(), request.getPassword());
             String token = jwtService.generateToken(usuario);
 
             LoginResponse response = new LoginResponse();

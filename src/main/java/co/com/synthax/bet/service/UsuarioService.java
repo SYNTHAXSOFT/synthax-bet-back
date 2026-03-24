@@ -1,12 +1,10 @@
 package co.com.synthax.bet.service;
 
-import co.com.synthax.bet.entity.Departamento;
-import co.com.synthax.bet.entity.Municipio;
 import co.com.synthax.bet.entity.Usuario;
-import co.com.synthax.bet.enums.Rol;
 import co.com.synthax.bet.repository.UsuarioRepository;
 import lombok.RequiredArgsConstructor;
 import org.springframework.stereotype.Service;
+
 import java.util.List;
 
 @Service
@@ -15,56 +13,11 @@ public class UsuarioService {
 
     private final UsuarioRepository usuarioRepository;
 
-    private final DepartamentoService departamentoService;
-    private final MunicipioService municipioService;
-
-    public Usuario crearUsuario(Usuario usuario, Long usuarioLogueadoId) {
+    public Usuario crearUsuario(Usuario usuario) {
         if (usuarioRepository.existsByEmail(usuario.getEmail())) {
             throw new RuntimeException("El email ya está registrado");
         }
-
-        // Obtener el usuario logueado para saber su rol
-        Usuario usuarioLogueado = obtenerUsuarioPorId(usuarioLogueadoId);
-    
-        // Validar y asignar departamento
-        if (usuario.getDepartamento() != null && usuario.getDepartamento().getId() != null) {
-            Departamento departamento = departamentoService.obtenerDepartamentoPorId(
-                    usuario.getDepartamento().getId()
-            );
-            usuario.setDepartamento(departamento);
-        } else {
-            usuario.setDepartamento(null);
-        }
-
-        // Validar y asignar municipio
-        if (usuario.getMunicipio() != null && usuario.getMunicipio().getId() != null) {
-            Municipio municipio = municipioService.obtenerMunicipioPorId(
-                    usuario.getMunicipio().getId()
-            );
-            usuario.setMunicipio(municipio);
-        } else {
-            usuario.setMunicipio(null);
-        }
-
         return usuarioRepository.save(usuario);
-    }
-
-    public List<Usuario> obtenerUsuariosPorRolUsuario(Long usuarioLogueadoId) {
-        Usuario usuarioLogueado = obtenerUsuarioPorId(usuarioLogueadoId);
-
-        switch (usuarioLogueado.getRol()) {
-            case ROOT:
-                // ROOT ve todos los usuarios
-                return usuarioRepository.findAll();
-
-
-            case ADMINISTRADOR:
-                // ADMINISTRADOR 
-                
-
-            default:
-                return List.of();
-        }
     }
 
     public List<Usuario> obtenerTodosLosUsuarios() {
@@ -77,50 +30,20 @@ public class UsuarioService {
     }
 
     public Usuario actualizarUsuario(Long id, Usuario usuario) {
-        Usuario usuarioExistente = obtenerUsuarioPorId(id);
+        Usuario existente = obtenerUsuarioPorId(id);
 
-        if (!usuarioExistente.getEmail().equals(usuario.getEmail())
+        if (!existente.getEmail().equals(usuario.getEmail())
                 && usuarioRepository.existsByEmail(usuario.getEmail())) {
             throw new RuntimeException("El email ya está registrado");
         }
 
-        if (usuario.getDepartamento() != null && usuario.getDepartamento().getId() != null) {
-            Departamento departamento = departamentoService.obtenerDepartamentoPorId(
-                    usuario.getDepartamento().getId()
-            );
-            usuarioExistente.setDepartamento(departamento);
-        } else {
-            usuarioExistente.setDepartamento(null);
-        }
+        existente.setNombre(usuario.getNombre());
+        existente.setEmail(usuario.getEmail());
+        existente.setPassword(usuario.getPassword());
+        existente.setRol(usuario.getRol());
+        existente.setActivo(usuario.getActivo());
 
-        // Validar y asignar municipio
-        if (usuario.getMunicipio() != null && usuario.getMunicipio().getId() != null) {
-            Municipio municipio = municipioService.obtenerMunicipioPorId(
-                    usuario.getMunicipio().getId()
-            );
-            usuarioExistente.setMunicipio(municipio);
-        } else {
-            usuarioExistente.setMunicipio(null);
-        }
-
-        usuarioExistente.setNombre(usuario.getNombre());
-
-        usuarioExistente.setNombre(usuario.getNombre());
-        usuarioExistente.setApellido(usuario.getApellido());
-        usuarioExistente.setEmail(usuario.getEmail());
-        usuarioExistente.setPassword(usuario.getPassword());
-        usuarioExistente.setRol(usuario.getRol());
-        usuarioExistente.setActivo(usuario.getActivo());
-        usuarioExistente.setCedula(usuario.getCedula());
-
-        return usuarioRepository.save(usuarioExistente);
-    }
-
-    public void eliminarUsuario(Long id) {
-        if (!usuarioRepository.existsById(id)) {
-            throw new RuntimeException("Usuario no encontrado con id: " + id);
-        }
-        usuarioRepository.deleteById(id);
+        return usuarioRepository.save(existente);
     }
 
     public Usuario desactivarUsuario(Long id) {
@@ -138,30 +61,14 @@ public class UsuarioService {
         }
 
         if (!usuario.getPassword().equals(password)) {
-            throw new RuntimeException("Contraseña incorrecta");
-        }
-
-        return usuario;
-    }
-
-    public List<Usuario> obtenerUsuariosPorRolActivos(String rol) {
-        return usuarioRepository.findByRolAndActivo(Rol.valueOf(rol), true);
-    }
-    
-    public Usuario buscarPorEmail(String email) {
-        return usuarioRepository.findByEmail(email)
-                .orElseThrow(() -> new RuntimeException("Usuario no encontrado con email: " + email));
-    }
-
-    public Usuario autenticarPorCedula(String cedula, String password) {
-        Usuario usuario = usuarioRepository.findByCedula(cedula)
-                .orElseThrow(() -> new RuntimeException("Usuario no encontrado con cédula: " + cedula));
-
-        if (!password.equals(usuario.getPassword())) {
             throw new RuntimeException("Credenciales incorrectas");
         }
 
         return usuario;
     }
 
+    public Usuario buscarPorEmail(String email) {
+        return usuarioRepository.findByEmail(email)
+                .orElseThrow(() -> new RuntimeException("Usuario no encontrado con email: " + email));
+    }
 }

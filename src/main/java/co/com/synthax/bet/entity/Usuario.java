@@ -1,7 +1,5 @@
 package co.com.synthax.bet.entity;
 
-import com.fasterxml.jackson.annotation.JsonIgnoreProperties;
-
 import co.com.synthax.bet.enums.Rol;
 import jakarta.persistence.*;
 import jakarta.validation.constraints.Email;
@@ -27,15 +25,7 @@ public class Usuario {
     @Column(nullable = false)
     private String nombre;
 
-    @NotBlank(message = "El apellido es obligatorio")
-    @Column(nullable = false)
-    private String apellido;
-
-    @NotBlank(message = "La cedula es obligatoria")
-    @Column(nullable = false, unique = true)
-    private String cedula;
-
-    @Email(message = "Email debe ser válido")
+    @Email(message = "El email debe ser válido")
     @NotBlank(message = "El email es obligatorio")
     @Column(nullable = false, unique = true)
     private String email;
@@ -44,9 +34,6 @@ public class Usuario {
     @Column(nullable = false)
     private String password;
 
-    @Column(name = "fecha_creacion")
-    private LocalDateTime fechaCreacion;
-
     @Enumerated(EnumType.STRING)
     @Column(nullable = false)
     private Rol rol;
@@ -54,18 +41,11 @@ public class Usuario {
     @Column(name = "activo")
     private Boolean activo = true;
 
-    @ManyToOne(fetch = FetchType.LAZY)
-    @JoinColumn(name = "departamento_id", nullable = true)
-    @JsonIgnoreProperties({"hibernateLazyInitializer", "handler"})
-    private Departamento departamento;
-
-    @ManyToOne(fetch = FetchType.LAZY)
-    @JoinColumn(name = "municipio_id", nullable = true)
-    @JsonIgnoreProperties({"hibernateLazyInitializer", "handler"})
-    private Municipio municipio;
+    @Column(name = "fecha_creacion")
+    private LocalDateTime fechaCreacion;
 
     @PrePersist
-    protected void onCreate() {
+    protected void alCrear() {
         fechaCreacion = LocalDateTime.now();
     }
 }
