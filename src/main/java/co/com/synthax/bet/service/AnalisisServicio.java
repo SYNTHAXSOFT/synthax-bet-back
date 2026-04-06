@@ -60,21 +60,71 @@ public class AnalisisServicio {
      * todos los saves posteriores fallan en cascada. Sin @Transactional cada
      * save() de MotorAnalisis corre en su propia mini-transacción.
      */
-    public List<Analisis> ejecutarAnalisisDelDia() {
-        List<Partido> partidos = partidoServicio.obtenerPartidosDeHoy();
+    /**
+     * Máximo de partidos a analizar por ejecución.
+     *
+     * ¿Por qué limitar?
+     *   Con 500+ partidos globales por día, analizar todos consume el límite de la
+     *   API gratuita (100 req/día) en estadísticas de equipos — dejando sin cupo
+     *   para la ingesta de cuotas. 40 partidos × 2 equipos = 80 requests stats,
+     *   + ~10 requests para cuotas = 90 total. Dentro del límite de 100.
+     *
+     *   Los primeros partidos en la lista son los más relevantes ya que la API los
+     *   ordena por liga/fecha. Para un control más fino se puede filtrar por ligas.
+     */
+    private static final int MAX_PARTIDOS_A_ANALIZAR = 40;
 
-        if (partidos.isEmpty()) {
+    /** Versión sin parámetros — para el scheduler y compatibilidad anterior. */
+    public List<Analisis> ejecutarAnalisisDelDia() {
+        return ejecutarAnalisisDelDia(null);
+    }
+
+    /**
+     * Ejecuta el motor sobre los partidos de hoy, opcionalmente filtrados por ligas.
+     *
+     * @param ligaIds lista de idLigaApi a procesar. Si es null o vacía, usa los primeros
+     *                MAX_PARTIDOS_A_ANALIZAR partidos del día sin filtro de liga.
+     */
+    public List<Analisis> ejecutarAnalisisDelDia(List<String> ligaIds) {
+        List<Partido> todosHoy = partidoServicio.obtenerPartidosDeHoy();
+
+        if (todosHoy.isEmpty()) {
             log.warn(">>> Sin partidos hoy para analizar");
             return List.of();
         }
 
-        List<Long> idsHoy = partidos.stream().map(Partido::getId).toList();
+        List<Partido> partidos;
 
-        long eliminados = analisisRepositorio.findByPartidoIdIn(idsHoy).size();
-        analisisRepositorio.deleteByPartidoIdIn(idsHoy);
+        if (ligaIds != null && !ligaIds.isEmpty()) {
+            // Filtrar por ligas seleccionadas
+            partidos = todosHoy.stream()
+                    .filter(p -> ligaIds.contains(p.getIdLigaApi()))
+                    .collect(java.util.stream.Collectors.toList());
+            log.info(">>> Análisis filtrado por {} ligas: {} partidos de {} totales hoy",
+                    ligaIds.size(), partidos.size(), todosHoy.size());
+        } else {
+            // Sin filtro: limitar a MAX_PARTIDOS_A_ANALIZAR para preservar cupo de API
+            partidos = todosHoy.size() > MAX_PARTIDOS_A_ANALIZAR
+                    ? todosHoy.subList(0, MAX_PARTIDOS_A_ANALIZAR)
+                    : todosHoy;
+            if (todosHoy.size() > MAX_PARTIDOS_A_ANALIZAR) {
+                log.info(">>> {} partidos hoy — limitando análisis a {} para preservar cupo de API",
+                        todosHoy.size(), MAX_PARTIDOS_A_ANALIZAR);
+            }
+        }
+
+        if (partidos.isEmpty()) {
+            log.warn(">>> Ningún partido de hoy coincide con las ligas seleccionadas");
+            return List.of();
+        }
+
+        List<Long> idsPartidos = partidos.stream().map(Partido::getId).toList();
+
+        long eliminados = analisisRepositorio.findByPartidoIdIn(idsPartidos).size();
+        analisisRepositorio.deleteByPartidoIdIn(idsPartidos);
         log.info(">>> {} análisis anteriores eliminados antes de re-ejecutar", eliminados);
 
-        log.info(">>> Re-ejecutando motor para {} partidos de hoy", partidos.size());
+        log.info(">>> Re-ejecutando motor para {} partidos", partidos.size());
         return motorAnalisis.analizarPartidos(partidos);
     }
 

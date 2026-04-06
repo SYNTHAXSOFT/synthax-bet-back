@@ -4,6 +4,7 @@ import co.com.synthax.bet.dto.FiltroSugerenciaDTO;
 import co.com.synthax.bet.dto.SugerenciaDTO;
 import co.com.synthax.bet.dto.SugerenciaLineaDTO;
 import co.com.synthax.bet.entity.Analisis;
+import co.com.synthax.bet.entity.Cuota;
 import co.com.synthax.bet.entity.Partido;
 import co.com.synthax.bet.enums.CategoriaAnalisis;
 import co.com.synthax.bet.repository.AnalisisRepositorio;
@@ -18,63 +19,57 @@ import java.util.stream.Collectors;
 
 /**
  * Genera sugerencias de apuestas del día combinando los mejores mercados
- * de partidos distintos, garantizando cuota combinada >= 1.80.
+ * de partidos distintos, priorizando edge real sobre la casa de apuestas.
  *
- * ── Algoritmo revisado (pools por tipo) ─────────────────────────────────────
+ * ── Algoritmo basado en edge real ────────────────────────────────────────────
  *
- * El problema del algoritmo anterior era que conservaba el mercado de MENOR
- * probabilidad por (partido × categoría), lo que llenaba el pool de mercados
- * al ~50% — apuestas de lanzamiento de moneda sin valor real.
+ * Edge = probabilidad_motor - (1 / cuota_real_casa)
  *
- * La corriente correcta es usar POOLS ESPECÍFICOS POR TIPO DE APUESTA:
+ * Ejemplo:
+ *   Motor calcula Over 2.5 → 68%
+ *   Casa paga cuota 2.10   → probabilidad implícita 47.6%
+ *   Edge = 68% - 47.6% = +20.4%  ← pick de valor real
  *
- *   SINGLE:  prob ∈ [50%, 55,6%]  → cuota individual ≥ 1,80
- *   DOBLE:   prob ∈ [50%, 74,5%]  → cuota individual ≥ √1,80 ≈ 1,342 → combinada ≥ 1,80
- *   TRIPLE:  prob ∈ [50%, 82,2%]  → cuota individual ≥ ∛1,80 ≈ 1,216 → combinada ≥ 1,80
+ * Score por pata = prob × (1 + max(0, edge))
+ *   Premia mercados con alta probabilidad Y donde la casa está pagando bien.
+ *   Una pata al 65% con +15% de edge puntúa mejor que una al 75% con edge 0%.
  *
- * En cada pool se conserva el mercado de MAYOR probabilidad (más confiable)
- * dentro del rango válido para ese tipo. Así:
- *   · Los singles rondan el 54-55% con cuota ~1,82-1,85.
- *   · Las dobles combinan patas al 70-74% con cuota combinada ~1,84-2,20.
- *   · Las triples combinan patas al 78-82% con cuota combinada ~1,82+.
+ * Ranking de combinaciones por edgePromedio (promedio de edges por pata).
+ *   El "pick del día" es el de mayor ventaja real total sobre la casa.
  *
- * La métrica de calidad principal pasa de ser "probabilidad combinada" a
- * "confianza promedio" (media de probabilidades por pata), que penaliza
- * correctamente los singles y premia las dobles/triples de alta confianza.
+ * ── Degradación elegante sin cuotas reales ───────────────────────────────────
+ *
+ * Si la tabla cuotas está vacía (proveedor no disponible o primera ejecución),
+ * el sistema usa cuota sintética (1/prob) y edge = 0.0 para todos los candidatos.
+ * El filtro de edge mínimo se desactiva y el ranking vuelve a confianzaPromedio.
+ * Las sugerencias siguen generándose — solo sin el componente de value bet.
  */
 @Slf4j
 @Service
 @RequiredArgsConstructor
 public class SugerenciaServicio {
 
-    // ── Cuota mínima por tipo de apuesta ─────────────────────────────────────
-    // Singles: cuota individual ≥ 1.25 (mercados de alta confianza son válidos)
-    // Dobles / Triples: cuota combinada ≥ 1.50
-    private static final double CUOTA_MINIMA_SINGLE   = 1.25;
+    // ── Cuota mínima combinada por tipo ──────────────────────────────────────
+    private static final double CUOTA_MINIMA_SINGLE    = 1.30;
     private static final double CUOTA_MINIMA_COMBINADA = 1.50;
+
+    // ── Cuota mínima por pata según origen ────────────────────────────────────
+    // Con cuota REAL: 1.15 — el edge puede justificar cuotas más bajas.
+    // Con cuota SINTÉTICA: 1.20 — equivale a prob ≤ 83%.
+    //   Bloquea "Under 4.5" al 87% (cuota 1.149 < 1.20) ← el problema original.
+    //   Permite "Over 1.5" al 77% (cuota 1.30 > 1.20) ← partidos con stats genéricas.
+    private static final double CUOTA_MIN_PATA_REAL      = 1.15;
+    private static final double CUOTA_MIN_PATA_SINTETICA = 1.20;
+
+    // ── Edge mínimo para descartar patas con cuota real NEGATIVA ─────────────
+    // Solo se excluye si el edge es claramente negativo (casa ofrece mal valor).
+    // Edge 0% o neutro se conserva — el edge se usa para RANKING, no como filtro duro.
+    private static final double EDGE_MINIMO = -0.05;
 
     // ── Probabilidad mínima aceptable para cualquier pata ────────────────────
     private static final double PROB_MINIMA_SELECCION = 0.50;
 
-    // ── Probabilidad máxima por tipo (garantiza cuota mínima por pata) ───────
-    // cuota_individual = 1 / prob
-    //
-    //   Single:  cuota ≥ 1.25   → prob ≤ 1/1.25  = 0.800
-    //            (sin límite superior de cuota: pools incluyen toda la rango [50%, 80%])
-    //
-    //   Doble:   cuota_comb ≥ 1.50 → cada pata cuota ≥ √1.50 ≈ 1.225 → prob ≤ 0.816
-    //
-    //   Triple:  cuota_comb ≥ 1.50 → cada pata cuota ≥ ∛1.50 ≈ 1.145 → prob ≤ 0.873
-    //
-    // Al ampliar estos rangos, el motor puede elegir mercados de ALTA confianza
-    // (70-85%) que antes quedaban excluidos. Mientras más alta la prob → mayor
-    // confianza → mejor predicción. Mayor cuota → mayor ganancia potencial.
-    private static final double PROB_MAX_SINGLE = 0.800;
-    private static final double PROB_MAX_DOBLE  = 0.816;
-    private static final double PROB_MAX_TRIPLE = 0.873;
-
-    // ── Tamaño máximo del pool por tipo ─────────────────────────────────────
-    // 60 entradas → C(60,3) ≈ 34K combinaciones por tipo: rápido y con variedad real
+    // ── Límites del pool y del resultado ─────────────────────────────────────
     private static final int MAX_CANDIDATOS_POOL  = 60;
     private static final int MAX_SUGERENCIAS_TIPO = 10;
 
@@ -89,6 +84,8 @@ public class SugerenciaServicio {
     );
 
     private final AnalisisRepositorio analisisRepositorio;
+    private final CuotaServicio       cuotaServicio;
+    private final NormalizadorMercado normalizadorMercado;
 
     // ─────────────────────────────────────────────────────────────────────────
     // Punto de entrada principal
@@ -96,7 +93,6 @@ public class SugerenciaServicio {
 
     public List<SugerenciaDTO> generarSugerenciasDelDia() {
 
-        // Paso 1: Análisis más reciente disponible (por calculadoEn)
         List<Analisis> analisisRecientes = obtenerAnalisisMasReciente();
 
         if (analisisRecientes.isEmpty()) {
@@ -104,16 +100,11 @@ public class SugerenciaServicio {
             return List.of();
         }
 
-        log.info(">>> [SUGERENCIAS] Análisis cargados: {} registros de {} partidos distintos",
+        log.info(">>> [SUGERENCIAS] Análisis cargados: {} registros de {} partidos",
                 analisisRecientes.size(),
                 analisisRecientes.stream().map(a -> a.getPartido().getId()).distinct().count());
 
-        // Diagnóstico: distribución por categoría
-        analisisRecientes.stream()
-                .collect(Collectors.groupingBy(a -> a.getCategoriaMercado().name(), Collectors.counting()))
-                .forEach((cat, cnt) -> log.info(">>> [SUGERENCIAS]   {} → {} análisis", cat, cnt));
-
-        // Paso 2: Filtrar por categoría apostable y probabilidad mínima global
+        // Filtrar por categoría apostable y probabilidad mínima
         List<Analisis> aptos = analisisRecientes.stream()
                 .filter(a -> CATEGORIAS_APOSTABLES.contains(a.getCategoriaMercado()))
                 .filter(a -> a.getProbabilidad() != null
@@ -123,46 +114,43 @@ public class SugerenciaServicio {
         log.info(">>> [SUGERENCIAS] Aptos (cat apostable + prob ≥ {}%): {}",
                 (int)(PROB_MINIMA_SELECCION * 100), aptos.size());
 
-        if (aptos.isEmpty()) {
-            log.warn(">>> [SUGERENCIAS] Ningún mercado supera el umbral mínimo.");
-            return List.of();
-        }
+        if (aptos.isEmpty()) return List.of();
 
-        // Diagnóstico de rango
-        double minProb = aptos.stream().mapToDouble(a -> a.getProbabilidad().doubleValue()).min().orElse(0);
-        double maxProb = aptos.stream().mapToDouble(a -> a.getProbabilidad().doubleValue()).max().orElse(0);
-        log.info(">>> [SUGERENCIAS] Rango de probabilidades disponible: [{}% – {}%]",
-                String.format("%.1f", minProb * 100), String.format("%.1f", maxProb * 100));
+        // Precargar cuotas de todos los partidos involucrados (batch, evita N+1)
+        List<Long> idsPartidos = aptos.stream()
+                .map(a -> a.getPartido().getId())
+                .distinct()
+                .collect(Collectors.toList());
+        Map<Long, List<Cuota>> cuotasMap = cuotaServicio.obtenerCuotasPorPartidos(idsPartidos);
 
-        // Paso 3: Construir un pool específico para cada tipo de apuesta
-        //   Cada pool guarda la pata MÁS CONFIABLE (mayor prob) dentro del rango válido
-        List<SugerenciaLineaDTO> poolSingle = construirPoolParaTipo(aptos, PROB_MAX_SINGLE);
-        List<SugerenciaLineaDTO> poolDoble  = construirPoolParaTipo(aptos, PROB_MAX_DOBLE);
-        List<SugerenciaLineaDTO> poolTriple = construirPoolParaTipo(aptos, PROB_MAX_TRIPLE);
+        boolean hayCuotasReales = cuotasMap.values().stream().anyMatch(l -> !l.isEmpty());
+        log.info(">>> [SUGERENCIAS] Cuotas reales disponibles: {} | partidos con cuotas: {}",
+                hayCuotasReales,
+                cuotasMap.values().stream().filter(l -> !l.isEmpty()).count());
 
-        log.info(">>> [SUGERENCIAS] Pools → single: {} cand. | doble: {} cand. | triple: {} cand.",
-                poolSingle.size(), poolDoble.size(), poolTriple.size());
+        // Construir UN pool unificado con score por pata
+        List<SugerenciaLineaDTO> pool = construirPool(aptos, cuotasMap, hayCuotasReales);
 
-        // Paso 4: Generar combinaciones con cuota mínima por tipo
-        // Singles: cuota individual ≥ 1.25 (más flexible, premia alta confianza)
-        // Dobles/Triples: cuota combinada ≥ 1.50
-        List<SugerenciaDTO> todosSimples = generarCombinaciones(poolSingle, 1, CUOTA_MINIMA_SINGLE);
-        List<SugerenciaDTO> todosDobles  = generarCombinaciones(poolDoble,  2, CUOTA_MINIMA_COMBINADA);
-        List<SugerenciaDTO> todosTriples = generarCombinaciones(poolTriple, 3, CUOTA_MINIMA_COMBINADA);
+        log.info(">>> [SUGERENCIAS] Pool construido: {} candidatos", pool.size());
+        if (pool.isEmpty()) return List.of();
 
-        log.info(">>> [SUGERENCIAS] Combinaciones válidas → simples: {}, dobles: {}, triples: {}",
-                todosSimples.size(), todosDobles.size(), todosTriples.size());
+        // Generar combinaciones por tipo con cuota mínima correspondiente
+        List<SugerenciaDTO> simples  = generarCombinaciones(pool, 1, CUOTA_MINIMA_SINGLE);
+        List<SugerenciaDTO> dobles   = generarCombinaciones(pool, 2, CUOTA_MINIMA_COMBINADA);
+        List<SugerenciaDTO> triples  = generarCombinaciones(pool, 3, CUOTA_MINIMA_COMBINADA);
+
+        log.info(">>> [SUGERENCIAS] Combinaciones → simples: {}, dobles: {}, triples: {}",
+                simples.size(), dobles.size(), triples.size());
 
         List<SugerenciaDTO> todas = new ArrayList<>();
-        todas.addAll(todosSimples);
-        todas.addAll(todosDobles);
-        todas.addAll(todosTriples);
+        todas.addAll(simples);
+        todas.addAll(dobles);
+        todas.addAll(triples);
 
-        // Ordenar por CONFIANZA PROMEDIO (media de prob por pata) descendente
-        todas.sort(Comparator.comparingDouble(SugerenciaDTO::getConfianzaPromedio).reversed());
-
-        log.info(">>> [SUGERENCIAS] Total combinadas válidas (single≥{} / comb≥{}): {}",
-                CUOTA_MINIMA_SINGLE, CUOTA_MINIMA_COMBINADA, todas.size());
+        // Ordenar por edgePromedio desc, luego confianzaPromedio como desempate
+        todas.sort(Comparator
+                .comparingDouble(SugerenciaDTO::getEdgePromedio).reversed()
+                .thenComparingDouble(SugerenciaDTO::getConfianzaPromedio).reversed());
 
         return armarRespuesta(todas);
     }
@@ -171,196 +159,189 @@ public class SugerenciaServicio {
     // Sugerencias personalizadas
     // ─────────────────────────────────────────────────────────────────────────
 
-    /**
-     * Genera combinadas aplicando los filtros enviados por el usuario.
-     * Usa el mismo mecanismo de pool por tipo, respetando el rango de
-     * probabilidad definido por el usuario.
-     */
     public List<SugerenciaDTO> generarPersonalizada(FiltroSugerenciaDTO filtro) {
 
-        double probMin  = filtro.getProbMinima()       != null ? filtro.getProbMinima()  : PROB_MINIMA_SELECCION;
-        double probMax  = filtro.getProbMaxima()       != null ? filtro.getProbMaxima()  : 1.0;
-        String equipo   = filtro.getEquipoBuscado()    != null ? filtro.getEquipoBuscado().trim().toLowerCase() : "";
-        String liga     = filtro.getLigaBuscada()      != null ? filtro.getLigaBuscada().trim().toLowerCase()   : "";
-        String tipo     = filtro.getTipoApuesta();
+        double probMin = filtro.getProbMinima()    != null ? filtro.getProbMinima()  : PROB_MINIMA_SELECCION;
+        double probMax = filtro.getProbMaxima()    != null ? filtro.getProbMaxima()  : 1.0;
+        String equipo  = filtro.getEquipoBuscado() != null ? filtro.getEquipoBuscado().trim().toLowerCase() : "";
+        String liga    = filtro.getLigaBuscada()   != null ? filtro.getLigaBuscada().trim().toLowerCase()   : "";
+        String tipo    = filtro.getTipoApuesta();
 
-        // Cuota mínima: el usuario puede sobrescribirla; si no, se aplica la del tipo
-        // Simple → 1.25 por defecto   |   Doble/Triple → 1.50 por defecto
-        double cuotaDefaultSingle = CUOTA_MINIMA_SINGLE;
-        double cuotaDefaultComb   = CUOTA_MINIMA_COMBINADA;
-        double cuotaMinima;
-        if (filtro.getCuotaMinimaTotal() != null) {
-            cuotaMinima = filtro.getCuotaMinimaTotal(); // el usuario manda
-        } else {
-            // si solo pide singles usamos 1.25, cualquier otro caso 1.50
-            cuotaMinima = "Simple".equalsIgnoreCase(tipo) ? cuotaDefaultSingle : cuotaDefaultComb;
-        }
+        // Si el usuario pasó un mínimo explícito se respeta para todos los tipos.
+        // Si no, cada tipo usa su propio umbral para no quedar vacío:
+        //   Simple  → CUOTA_MINIMA_SINGLE    (1.30)
+        //   Doble/Triple → CUOTA_MINIMA_COMBINADA (1.80)
+        Double cuotaFija = filtro.getCuotaMinimaTotal();
 
-        // Categorías activas
         Set<CategoriaAnalisis> categoriasActivas = CATEGORIAS_APOSTABLES;
         if (filtro.getCategorias() != null && !filtro.getCategorias().isEmpty()) {
             Set<CategoriaAnalisis> solicitadas = filtro.getCategorias().stream()
                     .map(String::toUpperCase)
-                    .filter(c -> { try { CategoriaAnalisis.valueOf(c); return true; } catch (IllegalArgumentException e) { return false; } })
+                    .filter(c -> { try { CategoriaAnalisis.valueOf(c); return true; }
+                                  catch (IllegalArgumentException e) { return false; } })
                     .map(CategoriaAnalisis::valueOf)
                     .filter(CATEGORIAS_APOSTABLES::contains)
                     .collect(Collectors.toSet());
             if (!solicitadas.isEmpty()) categoriasActivas = solicitadas;
         }
 
-        log.info(">>> [PERSONALIZADA] probMin={} probMax={} cuotaMin={} equipo='{}' liga='{}' tipo={} cats={}",
-                String.format("%.1f%%", probMin * 100), String.format("%.1f%%", probMax * 100),
-                cuotaMinima, equipo, liga, tipo, categoriasActivas);
-
         List<Analisis> analisisRecientes = obtenerAnalisisMasReciente();
-        if (analisisRecientes.isEmpty()) {
-            log.warn(">>> [PERSONALIZADA] Sin análisis disponibles.");
-            return List.of();
-        }
+        if (analisisRecientes.isEmpty()) return List.of();
 
-        // Filtrar por categorías, rango de probabilidad, liga y equipo al nivel de Analisis
-        // ── IMPORTANTE: liga y equipo se aplican AQUÍ, antes de construir el pool,
-        //    para que el límite de 60 entradas del pool se aplique dentro del conjunto
-        //    ya filtrado. Si se aplicaran después, mercados de la liga elegida podrían
-        //    quedar fuera del top-60 por ser desplazados por otras ligas con más partidos.
-        final Set<CategoriaAnalisis> catsFinal = categoriasActivas;
-        final String ligaFinal   = liga;
-        final String equipoFinal = equipo;
+        final Set<CategoriaAnalisis> catsFinal   = categoriasActivas;
+        final String                 ligaFinal   = liga;
+        final String                 equipoFinal = equipo;
 
         List<Analisis> aptos = analisisRecientes.stream()
                 .filter(a -> catsFinal.contains(a.getCategoriaMercado()))
                 .filter(a -> a.getProbabilidad() != null)
                 .filter(a -> a.getProbabilidad().doubleValue() >= probMin)
                 .filter(a -> a.getProbabilidad().doubleValue() <= probMax)
-                // Filtro de liga: todos los análisis deben ser de esa liga
                 .filter(a -> ligaFinal.isEmpty()
                         || (a.getPartido().getLiga() != null
                             && a.getPartido().getLiga().toLowerCase().contains(ligaFinal)))
-                // Filtro de equipo: al menos una selección en el partido que lo incluya
                 .filter(a -> equipoFinal.isEmpty()
                         || (a.getPartido().getEquipoLocal()     + " " +
                             a.getPartido().getEquipoVisitante()).toLowerCase().contains(equipoFinal))
                 .toList();
 
-        log.info(">>> [PERSONALIZADA] Aptos tras todos los filtros: {}", aptos.size());
         if (aptos.isEmpty()) return List.of();
 
-        // Construir pools por tipo usando el probMax del usuario como techo
-        double probMaxSingle = Math.min(probMax, PROB_MAX_SINGLE);
-        double probMaxDoble  = Math.min(probMax, PROB_MAX_DOBLE);
-        double probMaxTriple = Math.min(probMax, PROB_MAX_TRIPLE);
+        List<Long> idsPartidos = aptos.stream()
+                .map(a -> a.getPartido().getId()).distinct().collect(Collectors.toList());
+        Map<Long, List<Cuota>> cuotasMap = cuotaServicio.obtenerCuotasPorPartidos(idsPartidos);
+        boolean hayCuotasReales = cuotasMap.values().stream().anyMatch(l -> !l.isEmpty());
+
+        List<SugerenciaLineaDTO> pool = construirPool(aptos, cuotasMap, hayCuotasReales);
+        if (pool.isEmpty()) return List.of();
 
         List<SugerenciaDTO> todas = new ArrayList<>();
+        if (tipo == null || tipo.isBlank() || tipo.equalsIgnoreCase("Simple"))
+            todas.addAll(generarCombinaciones(pool, 1,
+                    cuotaFija != null ? cuotaFija : CUOTA_MINIMA_SINGLE));
+        if (tipo == null || tipo.isBlank() || tipo.equalsIgnoreCase("Doble"))
+            todas.addAll(generarCombinaciones(pool, 2,
+                    cuotaFija != null ? cuotaFija : CUOTA_MINIMA_COMBINADA));
+        if (tipo == null || tipo.isBlank() || tipo.equalsIgnoreCase("Triple"))
+            todas.addAll(generarCombinaciones(pool, 3,
+                    cuotaFija != null ? cuotaFija : CUOTA_MINIMA_COMBINADA));
 
-        if (tipo == null || tipo.isBlank() || tipo.equalsIgnoreCase("Simple")) {
-            List<SugerenciaLineaDTO> pool = construirPoolParaTipo(aptos, probMaxSingle);
-            todas.addAll(generarCombinaciones(pool, 1, cuotaMinima));
-        }
-        if (tipo == null || tipo.isBlank() || tipo.equalsIgnoreCase("Doble")) {
-            List<SugerenciaLineaDTO> pool = construirPoolParaTipo(aptos, probMaxDoble);
-            todas.addAll(generarCombinaciones(pool, 2, cuotaMinima));
-        }
-        if (tipo == null || tipo.isBlank() || tipo.equalsIgnoreCase("Triple")) {
-            List<SugerenciaLineaDTO> pool = construirPoolParaTipo(aptos, probMaxTriple);
-            todas.addAll(generarCombinaciones(pool, 3, cuotaMinima));
-        }
+        todas.sort(Comparator
+                .comparingDouble(SugerenciaDTO::getEdgePromedio).reversed()
+                .thenComparingDouble(SugerenciaDTO::getCuotaCombinada).reversed());
 
-        // Los filtros de liga y equipo ya se aplicaron sobre los Analisis arriba,
-        // por lo que todas las selecciones del pool ya cumplen esas condiciones.
-
-        todas.sort(Comparator.comparingDouble(SugerenciaDTO::getCuotaCombinada).reversed());
-        log.info(">>> [PERSONALIZADA] Resultado: {} combinadas encontradas", todas.size());
         return todas.stream().limit(20).collect(Collectors.toList());
     }
 
     // ─────────────────────────────────────────────────────────────────────────
-    // Construcción del pool de candidatos (lógica central del algoritmo)
+    // Construcción del pool (lógica central)
     // ─────────────────────────────────────────────────────────────────────────
 
     /**
-     * Construye el pool de candidatos para un tipo de apuesta.
+     * Construye el pool de candidatos aplicando:
      *
-     * DISEÑO CLAVE: se incluyen TODOS los mercados con prob ∈ [50%, probMax],
-     * sin filtrar "uno por (partido×categoría)". Esto es lo que genera variedad
-     * real en las cuotas de las sugerencias:
-     *
-     *   - El mismo partido puede aportar "GOLES Over 1.5" (76%, cuota 1.32)
-     *     Y "GOLES Over 2.5" (60%, cuota 1.67) Y "BTTS" (55%, cuota 1.82).
-     *
-     *   - El combinador elige UNO de ellos por partido (regla mismoPartido),
-     *     y según qué pareja forme, la cuota combinada puede salir en 1.50,
-     *     en 2.00 o en 3.00+. Eso es exactamente la variedad que se busca.
-     *
-     * Deduplicación: se eliminan análisis idénticos (mismo partido + mercado),
-     * pero se conservan mercados distintos del mismo partido/categoría.
-     *
-     * Pool limitado a MAX_CANDIDATOS_POOL (60) para mantener el tiempo de
-     * combinación razonable (C(60,3) ≈ 34K iteraciones).
+     * 1. Cuota mínima por pata (CUOTA_MIN_POR_PATA = 1.15) — cuota real cuando está
+     *    disponible, sintética como fallback.
+     * 2. Edge mínimo (EDGE_MINIMO = 3%) — solo cuando hay cuotas reales; se omite
+     *    si la tabla cuotas está vacía (degradación elegante).
+     * 3. Score = prob × (1 + max(0, edge)) para ordenar candidatos.
+     *    Premia tanto la alta probabilidad como la alta ventaja sobre la casa.
+     * 4. Deduplicación: mismo partido + mismo mercado → conservar el de mayor score.
      */
-    private List<SugerenciaLineaDTO> construirPoolParaTipo(List<Analisis> aptos, double probMax) {
-        // Dedup exacto: mismo partido + mismo nombre de mercado → quedarse con el de mayor prob
-        Map<String, Analisis> sinDuplicados = new HashMap<>();
-        for (Analisis a : aptos) {
-            double prob = a.getProbabilidad().doubleValue();
-            if (prob > probMax) continue;
+    private List<SugerenciaLineaDTO> construirPool(List<Analisis> aptos,
+                                                    Map<Long, List<Cuota>> cuotasMap,
+                                                    boolean hayCuotasReales) {
+        Map<String, SugerenciaLineaDTO> sinDuplicados = new HashMap<>();
 
-            String clave = a.getPartido().getId() + "_" + a.getNombreMercado(); // clave por mercado específico
-            sinDuplicados.merge(clave, a, (viejo, nuevo) ->
-                    nuevo.getProbabilidad().compareTo(viejo.getProbabilidad()) > 0 ? nuevo : viejo);
+        for (Analisis a : aptos) {
+            SugerenciaLineaDTO linea = toLineaDTO(a, cuotasMap);
+
+            boolean tieneReal = Boolean.TRUE.equals(linea.getCuotaReal());
+
+            // Filtro de edge: solo se aplica cuando ESTA pata tiene cuota real.
+            // Si la pata usa cuota sintética (bookmaker no ofrece ese mercado),
+            // no la descartamos — simplemente no podemos calcular el edge.
+            if (tieneReal && linea.getEdge() < EDGE_MINIMO) continue;
+
+            // Cuota mínima por pata:
+            //   Real    → 1.20 (el edge alto puede justificar cuotas bajas)
+            //   Sintética → 1.30 (equivale a prob ≤ 77%, evita el "Under 4.5 × 3")
+            double cuotaMinPata = tieneReal ? CUOTA_MIN_PATA_REAL : CUOTA_MIN_PATA_SINTETICA;
+            if (linea.getCuota() < cuotaMinPata) continue;
+
+            // Dedup: conservar el de mayor score para ese partido+mercado
+            String clave = a.getPartido().getId() + "_" + a.getNombreMercado();
+            sinDuplicados.merge(clave, linea, (viejo, nuevo) ->
+                    calcularScore(nuevo) > calcularScore(viejo) ? nuevo : viejo);
         }
 
         List<SugerenciaLineaDTO> pool = sinDuplicados.values().stream()
-                .map(this::toLineaDTO)
-                // Primero los más confiables (mayor prob), pero el pool incluye toda la gama
-                .sorted(Comparator.comparingDouble(SugerenciaLineaDTO::getProbabilidad).reversed())
+                .sorted(Comparator.comparingDouble(this::calcularScore).reversed())
                 .limit(MAX_CANDIDATOS_POOL)
                 .collect(Collectors.toList());
 
         if (!pool.isEmpty()) {
-            SugerenciaLineaDTO primero = pool.get(0);
-            SugerenciaLineaDTO ultimo  = pool.get(pool.size() - 1);
-            log.info(">>> [POOL techo={}%] {} mercados | prob: {}%-{}% | cuota: {}-{}",
-                    String.format("%.0f", probMax * 100), pool.size(),
-                    String.format("%.1f", ultimo.getProbabilidad()  * 100),
-                    String.format("%.1f", primero.getProbabilidad() * 100),
-                    String.format("%.2f", primero.getCuota()),
-                    String.format("%.2f", ultimo.getCuota()));
+            SugerenciaLineaDTO top    = pool.get(0);
+            SugerenciaLineaDTO bottom = pool.get(pool.size() - 1);
+            log.info(">>> [POOL] {} candidatos | score: {}-{} | edge: {}%-{}%",
+                    pool.size(),
+                    String.format("%.3f", calcularScore(bottom)),
+                    String.format("%.3f", calcularScore(top)),
+                    String.format("%.1f", bottom.getEdge() * 100),
+                    String.format("%.1f", top.getEdge() * 100));
         }
 
         return pool;
     }
 
     /**
-     * Aplica los filtros opcionales de equipo y liga sobre un pool ya construido.
-     * - equipo: búsqueda parcial en el nombre del partido ("Real Madrid" matchea "Real Madrid vs Barcelona")
-     * - liga:   búsqueda parcial en el campo liga ("premier" matchea "Premier League")
-     * Ambos son opcionales (cadena vacía = sin filtro).
+     * Score de una pata = prob × (1 + max(0, edge))
+     *
+     * Ejemplos:
+     *   prob=0.70, edge=+0.15  → score = 0.70 × 1.15 = 0.805  ← buen value bet
+     *   prob=0.80, edge=+0.00  → score = 0.80 × 1.00 = 0.800  ← alta confianza sin edge
+     *   prob=0.60, edge=+0.20  → score = 0.60 × 1.20 = 0.720  ← edge alto, prob media
      */
-    private List<SugerenciaLineaDTO> aplicarFiltrosPool(List<SugerenciaLineaDTO> pool,
-                                                         String equipo, String liga) {
-        return pool.stream()
-                .filter(c -> equipo.isEmpty() || c.getPartido().toLowerCase().contains(equipo))
-                .filter(c -> liga.isEmpty()   || c.getLiga().toLowerCase().contains(liga))
-                .collect(Collectors.toList());
+    private double calcularScore(SugerenciaLineaDTO linea) {
+        double edge = linea.getEdge() != null ? linea.getEdge() : 0.0;
+        return linea.getProbabilidad() * (1.0 + Math.max(0.0, edge));
     }
 
     /**
-     * Devuelve la lista de ligas únicas presentes en el análisis más reciente,
-     * ordenadas alfabéticamente. Se usa para poblar el select de ligas en el frontend.
+     * Convierte un Analisis en SugerenciaLineaDTO con cuota real y edge calculados.
+     *
+     * Busca la MEJOR cuota real disponible (la más alta = más favorable al apostador)
+     * en el mapa precargado de cuotas. Si no encuentra ninguna, usa cuota sintética
+     * (1/prob) y edge = 0.0.
      */
-    public List<String> obtenerLigasDisponibles() {
-        return obtenerAnalisisMasReciente().stream()
-                .map(a -> a.getPartido().getLiga())
-                .filter(liga -> liga != null && !liga.isBlank())
-                .distinct()
-                .sorted()
-                .collect(Collectors.toList());
-    }
-
-    private SugerenciaLineaDTO toLineaDTO(Analisis a) {
+    private SugerenciaLineaDTO toLineaDTO(Analisis a, Map<Long, List<Cuota>> cuotasMap) {
         Partido p    = a.getPartido();
         double  prob = a.getProbabilidad().doubleValue();
-        double  cuota = Math.round((1.0 / prob) * 100.0) / 100.0;
+
+        // Nombre del mercado en formato de la casa de apuestas
+        String nombreCasa = normalizadorMercado.aCasa(a.getNombreMercado());
+
+        // Buscar la mejor cuota real entre todos los bookmakers para este mercado
+        List<Cuota> cuotasPartido = cuotasMap.getOrDefault(p.getId(), List.of());
+        Optional<Cuota> mejorCuota = cuotasPartido.stream()
+                .filter(c -> normalizadorMercado.coinciden(
+                        c.getNombreMercado(), nombreCasa, a.getNombreMercado()))
+                .max(Comparator.comparingDouble(c -> c.getValorCuota().doubleValue()));
+
+        double cuotaFinal;
+        double edge;
+
+        boolean esCuotaReal;
+        if (mejorCuota.isPresent()) {
+            cuotaFinal   = mejorCuota.get().getValorCuota().doubleValue();
+            edge         = Math.round((prob - (1.0 / cuotaFinal)) * 10000.0) / 10000.0;
+            esCuotaReal  = true;
+        } else {
+            // Fallback: cuota sintética, edge = 0 (no sabemos si hay valor real)
+            cuotaFinal  = Math.round((1.0 / prob) * 100.0) / 100.0;
+            edge        = 0.0;
+            esCuotaReal = false;
+        }
 
         return new SugerenciaLineaDTO(
                 p.getId(),
@@ -369,7 +350,9 @@ public class SugerenciaServicio {
                 a.getCategoriaMercado().name(),
                 a.getNombreMercado(),
                 Math.round(prob * 10000.0) / 10000.0,
-                cuota
+                cuotaFinal,
+                edge,
+                esCuotaReal
         );
     }
 
@@ -377,13 +360,13 @@ public class SugerenciaServicio {
     // Generación de combinaciones
     // ─────────────────────────────────────────────────────────────────────────
 
-    private List<SugerenciaDTO> generarCombinaciones(List<SugerenciaLineaDTO> pool, int n, double cuotaMinima) {
+    private List<SugerenciaDTO> generarCombinaciones(List<SugerenciaLineaDTO> pool,
+                                                      int n, double cuotaMinima) {
         List<SugerenciaDTO> resultado = new ArrayList<>();
         combinar(pool, n, 0, new ArrayList<>(), resultado, cuotaMinima);
-        // Ordenar: primero por confianza promedio (calidad), luego por cuota (valor)
         resultado.sort(Comparator
-                .comparingDouble(SugerenciaDTO::getConfianzaPromedio).reversed()
-                .thenComparingDouble(SugerenciaDTO::getCuotaCombinada).reversed());
+                .comparingDouble(SugerenciaDTO::getEdgePromedio).reversed()
+                .thenComparingDouble(SugerenciaDTO::getConfianzaPromedio).reversed());
         return resultado.stream().limit(MAX_SUGERENCIAS_TIPO).collect(Collectors.toList());
     }
 
@@ -399,27 +382,30 @@ public class SugerenciaServicio {
                     .reduce(1.0, (a, b) -> a * b);
             cuotaCombinada = Math.round(cuotaCombinada * 100.0) / 100.0;
 
-            if (cuotaCombinada >= cuotaMinima) {
-                double confianzaPromedio = actual.stream()
-                        .mapToDouble(SugerenciaLineaDTO::getProbabilidad)
-                        .average()
-                        .orElse(0.0);
-                confianzaPromedio = Math.round(confianzaPromedio * 10000.0) / 10000.0;
+            if (cuotaCombinada < cuotaMinima) return;
 
-                String tipo = switch (n) {
-                    case 1  -> "Simple";
-                    case 2  -> "Doble";
-                    default -> "Triple";
-                };
-                resultado.add(new SugerenciaDTO(
-                        tipo,
-                        new ArrayList<>(actual),
-                        Math.round(probCombinada * 10000.0) / 10000.0,
-                        cuotaCombinada,
-                        construirDescripcion(actual, cuotaCombinada),
-                        confianzaPromedio
-                ));
-            }
+            double confianzaPromedio = actual.stream()
+                    .mapToDouble(SugerenciaLineaDTO::getProbabilidad)
+                    .average().orElse(0.0);
+            double edgePromedio = actual.stream()
+                    .mapToDouble(l -> l.getEdge() != null ? l.getEdge() : 0.0)
+                    .average().orElse(0.0);
+
+            String tipo = switch (n) {
+                case 1  -> "Simple";
+                case 2  -> "Doble";
+                default -> "Triple";
+            };
+
+            resultado.add(new SugerenciaDTO(
+                    tipo,
+                    new ArrayList<>(actual),
+                    Math.round(probCombinada  * 10000.0) / 10000.0,
+                    cuotaCombinada,
+                    construirDescripcion(actual, cuotaCombinada, edgePromedio),
+                    Math.round(confianzaPromedio * 10000.0) / 10000.0,
+                    Math.round(edgePromedio      * 10000.0) / 10000.0
+            ));
             return;
         }
 
@@ -430,27 +416,48 @@ public class SugerenciaServicio {
                     .anyMatch(s -> s.getIdPartido().equals(candidato.getIdPartido()));
             if (mismoPartido) continue;
 
+            // En triples: no repetir el mismo mercado (evita "Under 4.5 × 3").
+            // En dobles: se permite (ej: "Over 2.5" + "Over 2.5" es perfectamente válido).
+            if (n == 3) {
+                boolean mercadoRepetido = actual.stream()
+                        .anyMatch(s -> s.getMercado().equalsIgnoreCase(candidato.getMercado()));
+                if (mercadoRepetido) continue;
+            }
+
             actual.add(candidato);
             combinar(pool, n, i + 1, actual, resultado, cuotaMinima);
             actual.remove(actual.size() - 1);
         }
     }
 
-    private String construirDescripcion(List<SugerenciaLineaDTO> selecciones, double cuota) {
+    private String construirDescripcion(List<SugerenciaLineaDTO> selecciones,
+                                         double cuota, double edgePromedio) {
         String mercados = selecciones.stream()
                 .map(s -> s.getMercado() + " (" + s.getCategoria() + ")")
                 .collect(Collectors.joining(" + "));
+        if (edgePromedio > 0) {
+            return String.format("%s | Cuota: %.2f | Edge: +%.1f%%",
+                    mercados, cuota, edgePromedio * 100);
+        }
         return String.format("%s | Cuota: %.2f", mercados, cuota);
+    }
+
+    // ─────────────────────────────────────────────────────────────────────────
+    // Ligas disponibles
+    // ─────────────────────────────────────────────────────────────────────────
+
+    public List<String> obtenerLigasDisponibles() {
+        return obtenerAnalisisMasReciente().stream()
+                .map(a -> a.getPartido().getLiga())
+                .filter(liga -> liga != null && !liga.isBlank())
+                .distinct().sorted()
+                .collect(Collectors.toList());
     }
 
     // ─────────────────────────────────────────────────────────────────────────
     // Obtener análisis más reciente
     // ─────────────────────────────────────────────────────────────────────────
 
-    /**
-     * Devuelve los análisis del día de hoy (por calculadoEn).
-     * Si hoy no hay análisis, devuelve los del día más reciente en la BD.
-     */
     private List<Analisis> obtenerAnalisisMasReciente() {
         LocalDateTime inicioDia = LocalDate.now().atStartOfDay();
         LocalDateTime finDia    = LocalDate.now().atTime(23, 59, 59);
@@ -461,7 +468,7 @@ public class SugerenciaServicio {
             return hoy;
         }
 
-        log.info(">>> [SUGERENCIAS] Sin análisis de hoy. Buscando el más reciente en BD...");
+        log.info(">>> [SUGERENCIAS] Sin análisis de hoy. Buscando el más reciente...");
         return analisisRepositorio.findMaxCalculadoEn()
                 .map(maxFecha -> {
                     LocalDateTime ini = maxFecha.toLocalDate().atStartOfDay();
@@ -480,24 +487,21 @@ public class SugerenciaServicio {
 
     /**
      * Devuelve:
-     * - Sugerencia del día: la de mayor CONFIANZA PROMEDIO (mejor pata por pata)
-     * - Mejor simple, doble y triple (si existen y no son la del día)
+     * - La "del día": mayor edgePromedio (mejor value bet real sobre la casa)
+     * - La mejor de cada tipo (Simple, Doble, Triple) que no sea la del día
      *
-     * Nota: ordenar por confianzaPromedio (no por probabilidadCombinada) es clave.
-     * Un triple con patas al 79% tiene confianza promedio 79%, mientras que
-     * un single al 54% tiene solo 54%. El triple es mucho más fiable pata a pata.
+     * Cuando no hay cuotas reales, edgePromedio = 0 para todos y el orden
+     * recae en confianzaPromedio (comportamiento anterior).
      */
     private List<SugerenciaDTO> armarRespuesta(List<SugerenciaDTO> todas) {
         if (todas.isEmpty()) return List.of();
 
         List<SugerenciaDTO> respuesta = new ArrayList<>();
 
-        // La "del día" es la de mayor confianza promedio (ya viene ordenada así)
         SugerenciaDTO delDia = todas.get(0);
         delDia.setDescripcion("⭐ " + delDia.getDescripcion());
         respuesta.add(delDia);
 
-        // Añadir la mejor de cada tipo que no sea la del día
         for (String tipo : List.of("Simple", "Doble", "Triple")) {
             todas.stream()
                     .filter(s -> s.getTipo().equals(tipo) && s != delDia)

@@ -59,29 +59,34 @@ public class ApiFootballMapper {
     public static List<CuotaExterna> toCuotasExternas(ApiFootballOddsDTO dto, String idPartido) {
         List<CuotaExterna> cuotas = new ArrayList<>();
 
-        if (dto.getBookmaker() == null || dto.getBookmaker().getBets() == null) {
+        if (dto.getBookmakers() == null || dto.getBookmakers().isEmpty()) {
             return cuotas;
         }
 
-        String casaApuestas = dto.getBookmaker().getName();
+        // Iterar sobre TODAS las casas de apuestas del fixture
+        for (ApiFootballOddsDTO.BookmakerInfo bookmaker : dto.getBookmakers()) {
+            if (bookmaker == null || bookmaker.getBets() == null) continue;
 
-        for (ApiFootballOddsDTO.BetInfo bet : dto.getBookmaker().getBets()) {
-            if (bet.getValues() == null) continue;
+            String casaApuestas = bookmaker.getName();
 
-            for (ApiFootballOddsDTO.ValueInfo val : bet.getValues()) {
-                try {
-                    double valorCuota = Double.parseDouble(val.getOdd());
-                    String nombreMercado = bet.getName() + " - " + val.getValue();
+            for (ApiFootballOddsDTO.BetInfo bet : bookmaker.getBets()) {
+                if (bet.getValues() == null) continue;
 
-                    CuotaExterna cuota = new CuotaExterna(
-                            idPartido,
-                            casaApuestas,
-                            nombreMercado,
-                            valorCuota
-                    );
-                    cuotas.add(cuota);
-                } catch (NumberFormatException e) {
-                    // cuota no numérica, se omite
+                for (ApiFootballOddsDTO.ValueInfo val : bet.getValues()) {
+                    try {
+                        double valorCuota = Double.parseDouble(val.getOdd());
+                        // Nombre estandarizado: "Match Winner - Home", "Goals Over/Under - Over 2.5"
+                        String nombreMercado = bet.getName() + " - " + val.getValue();
+
+                        cuotas.add(new CuotaExterna(
+                                idPartido,
+                                casaApuestas,
+                                nombreMercado,
+                                valorCuota
+                        ));
+                    } catch (NumberFormatException e) {
+                        // cuota no numérica (ej: "SUSPENDED"), se omite
+                    }
                 }
             }
         }

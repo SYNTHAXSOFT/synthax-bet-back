@@ -7,12 +7,21 @@ import java.util.List;
 
 /**
  * DTO para cuotas (odds) de API-Football.
+ *
+ * Estructura real de /odds:
+ * {
+ *   "fixture": {...},
+ *   "bookmakers": [          ← array, no objeto singular
+ *     { "id": 8, "name": "Bet365", "bets": [...] }
+ *   ]
+ * }
  */
 @Data
 @JsonIgnoreProperties(ignoreUnknown = true)
 public class ApiFootballOddsDTO {
 
-    private BookmakerInfo bookmaker;
+    /** Lista de casas de apuestas disponibles para este fixture. */
+    private List<BookmakerInfo> bookmakers;
 
     @Data
     @JsonIgnoreProperties(ignoreUnknown = true)

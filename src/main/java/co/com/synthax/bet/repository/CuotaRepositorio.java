@@ -11,6 +11,9 @@ public interface CuotaRepositorio extends JpaRepository<Cuota, Long> {
 
     List<Cuota> findByPartidoId(Long idPartido);
 
+    /** Carga cuotas de múltiples partidos en una sola query — evita N+1 */
+    List<Cuota> findByPartidoIdIn(List<Long> idsPartidos);
+
     List<Cuota> findByPartidoIdAndCasaApuestas(Long idPartido, String casaApuestas);
 
     List<Cuota> findByPartidoIdAndNombreMercadoContaining(Long idPartido, String mercado);

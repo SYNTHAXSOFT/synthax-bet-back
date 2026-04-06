@@ -84,15 +84,25 @@ public class AnalisisControlador {
     /**
      * POST /api/analisis/ejecutar
      * Fuerza re-ejecución del motor sobre los partidos de hoy (solo admin).
+     *
+     * Body opcional: { "ligaIds": ["239", "39", "140"] }
+     * Si no se envía ligaIds, analiza los primeros MAX_PARTIDOS_A_ANALIZAR del día.
      */
     @PreAuthorize("hasAnyRole('ROOT', 'ADMINISTRADOR')")
     @PostMapping("/ejecutar")
-    public ResponseEntity<?> ejecutarMotor() {
+    public ResponseEntity<?> ejecutarMotor(
+            @RequestBody(required = false) Map<String, Object> body) {
         try {
-            List<Analisis> resultados = analisisServicio.ejecutarAnalisisDelDia();
+            @SuppressWarnings("unchecked")
+            List<String> ligaIds = (body != null && body.containsKey("ligaIds"))
+                    ? (List<String>) body.get("ligaIds")
+                    : null;
+
+            List<Analisis> resultados = analisisServicio.ejecutarAnalisisDelDia(ligaIds);
             Map<String, Object> respuesta = new HashMap<>();
             respuesta.put("mensaje", "Motor ejecutado correctamente");
             respuesta.put("analisesGenerados", resultados.size());
+            respuesta.put("ligasFiltradas", ligaIds != null ? ligaIds.size() : "todas (limitado a 40)");
             return ResponseEntity.ok(respuesta);
         } catch (Exception e) {
             Map<String, String> error = new HashMap<>();

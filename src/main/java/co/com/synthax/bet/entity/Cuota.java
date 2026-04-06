@@ -29,7 +29,7 @@ public class Cuota {
     @Column(name = "nombre_mercado", nullable = false)
     private String nombreMercado;  // "Over 2.5", "1X2 - Home"
 
-    @Column(name = "valor_cuota", precision = 6, scale = 3, nullable = false)
+    @Column(name = "valor_cuota", precision = 10, scale = 3, nullable = false)
     private BigDecimal valorCuota;  // 1.850
 
     @Column(name = "probabilidad_impl", precision = 5, scale = 4)

@@ -291,10 +291,16 @@ public class ApiFootballAdaptador implements ProveedorFutbol, ProveedorCuotas {
     public List<CuotaExterna> obtenerCuotasPorPartido(String idPartido) {
         String cacheKey = "cuotas:" + idPartido;
 
+        // Solo usar caché si hay datos reales (no cachear resultados vacíos)
         List<CuotaExterna> cacheado = gestorCache.obtener(cacheKey, List.class);
-        if (cacheado != null) return cacheado;
+        if (cacheado != null && !cacheado.isEmpty()) {
+            log.info(">>> Cache HIT: cuotas partido {}", idPartido);
+            return cacheado;
+        }
 
         if (!gestorCache.puedeHacerRequest()) return Collections.emptyList();
+
+        log.info(">>> Consultando API-Football: /odds?fixture={}", idPartido);
 
         try {
             String json = restClient.get()
@@ -307,6 +313,11 @@ public class ApiFootballAdaptador implements ProveedorFutbol, ProveedorCuotas {
             ApiFootballRespuesta<Map<String, Object>> respuestaRaw = objectMapper.readValue(
                     json, new TypeReference<>() {});
 
+            if (respuestaRaw.getResponse() == null || respuestaRaw.getResponse().isEmpty()) {
+                log.warn(">>> API-Football: sin odds disponibles para fixture {}", idPartido);
+                return Collections.emptyList();
+            }
+
             List<ApiFootballOddsDTO> oddsDtos = objectMapper.convertValue(
                     respuestaRaw.getResponse(), new TypeReference<>() {});
 
@@ -314,7 +325,13 @@ public class ApiFootballAdaptador implements ProveedorFutbol, ProveedorCuotas {
                     .flatMap(dto -> ApiFootballMapper.toCuotasExternas(dto, idPartido).stream())
                     .collect(Collectors.toList());
 
-            gestorCache.guardar(cacheKey, cuotas);
+            log.info(">>> {} cuotas obtenidas de la API para fixture {}", cuotas.size(), idPartido);
+
+            // Solo cachear si hay datos reales
+            if (!cuotas.isEmpty()) {
+                gestorCache.guardar(cacheKey, cuotas);
+            }
+
             return cuotas;
 
         } catch (Exception e) {
