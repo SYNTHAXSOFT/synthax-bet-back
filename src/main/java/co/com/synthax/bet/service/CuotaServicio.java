@@ -1,5 +1,6 @@
 package co.com.synthax.bet.service;
 
+import co.com.synthax.bet.dto.IngestaCuotasResultadoDTO;
 import co.com.synthax.bet.dto.LigaDisponibleDTO;
 import co.com.synthax.bet.entity.Analisis;
 import co.com.synthax.bet.entity.Cuota;
@@ -66,83 +67,126 @@ public class CuotaServicio {
     /**
      * Ingestiona cuotas SOLO para los partidos que tienen análisis generados.
      *
-     * ¿Por qué no todos los partidos del día?
+     * ── ¿Por qué no todos los partidos del día? ──────────────────────────────
      *   El plan gratuito de API-Football permite 100 requests/día.
      *   Hay días con 200-300 partidos globales pero solo 10-20 son analizados
-     *   por el motor. Ingestar cuotas de los 300 agotar el límite diario sin
-     *   ningún valor — las cuotas solo sirven donde hay análisis para calcular edge.
+     *   por el motor. Ingestar cuotas de los 300 agotaría el cupo diario sin
+     *   ningún valor — las cuotas solo sirven donde hay análisis para calcular
+     *   edge real.
      *
-     * Flujo:
-     *   1. Carga análisis del día (o del más reciente si hoy no hay)
-     *   2. Extrae partidos únicos de esos análisis
-     *   3. Solo esos partidos se consultan en la API de cuotas
+     * ── Flujo recomendado de uso (admin) ─────────────────────────────────────
+     *   1. Sincronizar partidos del día           (~ 1 request)
+     *   2. Ejecutar análisis filtrado por ligas    (~ 2 requests por equipo
+     *                                                 nuevo, 0 si ya están en BD)
+     *   3. Ingestar cuotas para los analizados     (~ 1 request por partido)
+     *   4. Ver sugerencias del día / personalizar
      *
-     * Consumo típico: 10-20 requests/día (uno por partido analizado).
+     * Importante: el GestorCache reserva un cupo dedicado para cuotas
+     * (`statbet.apis.api-football.reserva-cuotas`, default 30) que el análisis
+     * NO puede tocar. Esto garantiza que aunque el análisis consuma todo el
+     * resto del cupo, la ingesta de cuotas siempre tenga su parte asegurada.
      *
-     * @return total de cuotas persistidas en esta ejecución
+     * Consumo típico bien optimizado: ~25-40 requests/día (1 por partido).
+     *
+     * @return DTO con el detalle completo de la ingesta (presupuesto, partidos
+     *         consultados, partidos sin cuotas, motivo de aborto si lo hubo).
      */
-    public int ingestarCuotasDelDia() {
-        return ingestarCuotasDelDia(null);
+    public IngestaCuotasResultadoDTO ingestarCuotasDelDiaDetallado() {
+        return ingestarCuotasDelDiaDetallado(null);
     }
 
-    public int ingestarCuotasDelDia(List<String> ligaIds) {
+    public IngestaCuotasResultadoDTO ingestarCuotasDelDiaDetallado(List<String> ligaIds) {
+        // Guardamos el snapshot de requests al inicio para calcular el delta al final.
+        final int requestsAlInicio = gestorCache.contarRequestsHoy();
+
+        IngestaCuotasResultadoDTO.IngestaCuotasResultadoDTOBuilder rb = IngestaCuotasResultadoDTO.builder()
+                .requestsMaxDiarios(gestorCache.requestsMax())
+                .requestsUsadosAntes(requestsAlInicio)
+                .requestsRestantesParaCuotas(gestorCache.requestsDisponiblesParaCuotas())
+                .partidosSinCuotasMuestra(new ArrayList<>());
+
+        // ── Validación 1: proveedor disponible ───────────────────────────────
         if (proveedorCuotas == null) {
             log.warn(">>> [CUOTAS] No hay proveedor de cuotas configurado.");
-            return 0;
+            return rb.estado("abortado")
+                    .motivo("SIN_PROVEEDOR")
+                    .mensaje("No hay proveedor de cuotas configurado. Revisa " +
+                            "statbet.proveedor.cuotas en application.properties.")
+                    .requestsUsadosDespues(gestorCache.contarRequestsHoy())
+                    .build();
         }
 
-        // Cargar solo los partidos con análisis (no todos los del día)
+        // ── Validación 2: hay partidos con análisis ──────────────────────────
         List<Partido> partidos = obtenerPartidosConAnalisis();
+        rb.totalPartidosConAnalisis(partidos.size());
 
         if (partidos.isEmpty()) {
-            log.warn(">>> [CUOTAS] Sin partidos con análisis. Ejecuta primero el motor de análisis.");
-            return 0;
+            log.warn(">>> [CUOTAS] Sin partidos con análisis. Ejecuta primero el motor.");
+            return rb.estado("abortado")
+                    .motivo("SIN_PARTIDOS")
+                    .mensaje("No hay partidos analizados hoy. Ejecuta primero el botón " +
+                            "'Ejecutar análisis' antes de ingestar cuotas.")
+                    .requestsUsadosDespues(gestorCache.contarRequestsHoy())
+                    .build();
         }
 
-        // Filtrar por ligas seleccionadas si se especificaron
+        // ── Filtro opcional por ligas seleccionadas ──────────────────────────
         if (ligaIds != null && !ligaIds.isEmpty()) {
             partidos = partidos.stream()
                     .filter(p -> ligaIds.contains(p.getIdLigaApi()))
                     .collect(Collectors.toList());
-            log.info(">>> [CUOTAS] Filtrado por {} ligas seleccionadas: {} partidos resultantes",
+            log.info(">>> [CUOTAS] Filtrado por {} ligas: {} partidos",
                     ligaIds.size(), partidos.size());
         }
+        rb.partidosFiltradosPorLiga(partidos.size());
 
-        int requestsUsados    = gestorCache.contarRequestsHoy();
-        int requestsDisponibles = 100 - requestsUsados;
-        log.info(">>> [CUOTAS] Requests API hoy: {}/100 — disponibles: {}", requestsUsados, requestsDisponibles);
+        // ── Validación 3: presupuesto de requests para cuotas ────────────────
+        int disponiblesParaCuotas = gestorCache.requestsDisponiblesParaCuotas();
+        log.info(">>> [CUOTAS] Requests API hoy: {}/{} — disponibles para cuotas: {}",
+                gestorCache.contarRequestsHoy(),
+                gestorCache.requestsMax(),
+                disponiblesParaCuotas);
 
-        if (requestsDisponibles < 5) {
-            log.warn(">>> [CUOTAS] Límite diario agotado ({}/100). No se pueden ingestar cuotas hoy. " +
-                    "Reinicia el servidor mañana o revisa el contador.", requestsUsados);
-            return 0;
+        if (disponiblesParaCuotas <= 0) {
+            log.warn(">>> [CUOTAS] Cupo agotado ({}/{}). No quedan requests ni siquiera para cuotas.",
+                    gestorCache.contarRequestsHoy(), gestorCache.requestsMax());
+            return rb.estado("abortado")
+                    .motivo("BUDGET_AGOTADO")
+                    .mensaje(String.format("Cupo diario agotado (%d/%d). " +
+                                    "Espera al reset diario para volver a ingestar.",
+                            gestorCache.contarRequestsHoy(), gestorCache.requestsMax()))
+                    .requestsUsadosDespues(gestorCache.contarRequestsHoy())
+                    .build();
         }
 
-        log.info(">>> [CUOTAS] Partidos con análisis encontrados: {}. Se ingirirán máximo {} " +
-                "(o menos si el budget de requests es limitado).", partidos.size(), MAX_PARTIDOS_A_INGESTAR);
-
-        // Calcular cuántos partidos podemos procesar con el budget actual
-        // Dejamos 5 de margen para otras operaciones
-        int presupuesto = Math.min(requestsDisponibles - 5, MAX_PARTIDOS_A_INGESTAR);
+        // Procesar como máximo MAX_PARTIDOS_A_INGESTAR partidos en una sola
+        // ejecución, o menos si el cupo restante es más pequeño.
+        int presupuesto = Math.min(disponiblesParaCuotas, MAX_PARTIDOS_A_INGESTAR);
 
         List<Partido> conApiId = partidos.stream()
                 .filter(p -> p.getIdPartidoApi() != null)
                 .limit(presupuesto)
                 .collect(Collectors.toList());
 
+        // ── Validación 4: los partidos tienen ID externo ─────────────────────
         if (conApiId.isEmpty()) {
-            log.warn(">>> [CUOTAS] Ningún partido tiene idPartidoApi — verifica que la sincronización guardó el ID externo.");
-            return 0;
+            log.warn(">>> [CUOTAS] Ningún partido tiene idPartidoApi — la sincronización no guardó el ID externo.");
+            return rb.estado("abortado")
+                    .motivo("SIN_ID_API")
+                    .mensaje("Los partidos no tienen idPartidoApi. " +
+                            "Vuelve a sincronizar partidos del día.")
+                    .requestsUsadosDespues(gestorCache.contarRequestsHoy())
+                    .build();
         }
 
-        log.info(">>> [CUOTAS] Partidos a consultar en esta ejecución: {} de {} disponibles",
+        log.info(">>> [CUOTAS] Partidos a consultar: {} de {} disponibles",
                 conApiId.size(), partidos.size());
 
-        // ── Paso 1: precargar TODAS las cuotas existentes en UNA sola query ──────
+        // ── Paso 1: precargar todas las cuotas existentes en UNA sola query ──
         List<Long> idsPartidos = conApiId.stream().map(Partido::getId).collect(Collectors.toList());
         List<Cuota> todasExistentes = cuotaRepositorio.findByPartidoIdIn(idsPartidos);
 
-        // ── Paso 2: construir índice en memoria: partidoId → (clave → Cuota) ─────
+        // ── Paso 2: índice en memoria: partidoId → (casa::mercado → Cuota) ───
         Map<Long, Map<String, Cuota>> indiceGlobal = todasExistentes.stream()
                 .collect(Collectors.groupingBy(
                         c -> c.getPartido().getId(),
@@ -153,8 +197,9 @@ public class CuotaServicio {
                         )
                 ));
 
-        // ── Paso 3: consultar API y preparar cuotas a guardar (sin tocar la BD) ──
-        List<Cuota> todasAGuardar = new java.util.ArrayList<>();
+        // ── Paso 3: consultar API y preparar cuotas a guardar ────────────────
+        List<Cuota>   todasAGuardar       = new ArrayList<>();
+        List<String>  partidosSinCuotas    = new ArrayList<>();
 
         for (Partido partido : conApiId) {
             try {
@@ -162,10 +207,12 @@ public class CuotaServicio {
                         proveedorCuotas.obtenerCuotasPorPartido(partido.getIdPartidoApi());
 
                 if (externas.isEmpty()) {
-                    log.warn(">>> [CUOTAS] API devolvió 0 cuotas para fixture {} ({} vs {}) — " +
-                                    "posible causa: límite de requests, fixture sin odds, o plan sin acceso a odds",
-                            partido.getIdPartidoApi(),
-                            partido.getEquipoLocal(), partido.getEquipoVisitante());
+                    String etiqueta = partido.getEquipoLocal() + " vs " + partido.getEquipoVisitante();
+                    partidosSinCuotas.add(etiqueta);
+                    log.warn(">>> [CUOTAS] API devolvió 0 cuotas para fixture {} ({}) — " +
+                                    "posible causa: fixture sin odds en API, plan sin acceso a esa liga, " +
+                                    "o partido demasiado lejano para que la casa publique cuotas",
+                            partido.getIdPartidoApi(), etiqueta);
                     continue;
                 }
 
@@ -201,32 +248,77 @@ public class CuotaServicio {
             }
         }
 
-        // ── Paso 4: un único saveAll() para todos los partidos ───────────────────
+        // ── Paso 4: un único saveAll() para todos los partidos ───────────────
         if (!todasAGuardar.isEmpty()) {
             cuotaRepositorio.saveAll(todasAGuardar);
         }
 
-        log.info(">>> [CUOTAS] Ingesta completada: {} cuotas persistidas en total", todasAGuardar.size());
-        return todasAGuardar.size();
+        int usadosDespues = gestorCache.contarRequestsHoy();
+        int gastados      = usadosDespues - requestsAlInicio;
+
+        // Mensaje accionable según resultado
+        String mensajeFinal;
+        String estadoFinal = "ok";
+        if (todasAGuardar.isEmpty() && partidosSinCuotas.size() == conApiId.size()) {
+            estadoFinal = "ok_sin_cuotas";
+            mensajeFinal = String.format(
+                    "Se consultaron %d partidos pero la API devolvió 0 cuotas para todos. " +
+                    "Probable causa: el plan gratuito de API-Football no incluye odds para " +
+                    "estas ligas, o los fixtures están demasiado lejos para tener cuotas publicadas.",
+                    conApiId.size());
+        } else {
+            mensajeFinal = String.format(
+                    "Ingesta completada: %d cuotas guardadas para %d partidos (%d sin cuotas en API). " +
+                    "Requests consumidos: %d.",
+                    todasAGuardar.size(),
+                    conApiId.size() - partidosSinCuotas.size(),
+                    partidosSinCuotas.size(),
+                    gastados);
+        }
+
+        log.info(">>> [CUOTAS] {}", mensajeFinal);
+
+        return rb.estado(estadoFinal)
+                .mensaje(mensajeFinal)
+                .partidosConsultados(conApiId.size())
+                .partidosSinCuotasEnApi(partidosSinCuotas.size())
+                .partidosSinCuotasMuestra(partidosSinCuotas.stream().limit(10).toList())
+                .cuotasPersistidas(todasAGuardar.size())
+                .requestsUsadosDespues(usadosDespues)
+                .requestsConsumidosEnIngesta(gastados)
+                .requestsRestantesParaCuotas(gestorCache.requestsDisponiblesParaCuotas())
+                .build();
     }
 
     /**
-     * Retorna los partidos para los que se deben ingestar cuotas.
-     *
-     * Prioridad:
-     *   1. Partidos con análisis de HOY → los más relevantes (motor ya los procesó)
-     *   2. Si no hay análisis de hoy: partidos de HOY en BD limitados a MAX_PARTIDOS_SIN_ANALISIS
-     *      (el motor no corrió aún, pero igual queremos tener cuotas listas)
-     *   3. Si tampoco hay partidos de hoy: vacío (nada que hacer)
-     *
-     * Se excluyen siempre partidos sin idPartidoApi (no consultables en la API).
+     * Wrapper retrocompatible que mantiene la firma vieja `int` para llamadores
+     * internos que solo querían el conteo. Llama internamente al método nuevo
+     * y descarta el detalle.
      */
-    private static final int MAX_PARTIDOS_SIN_ANALISIS = 40;
+    public int ingestarCuotasDelDia() {
+        return ingestarCuotasDelDiaDetallado(null).getCuotasPersistidas();
+    }
+
+    public int ingestarCuotasDelDia(List<String> ligaIds) {
+        return ingestarCuotasDelDiaDetallado(ligaIds).getCuotasPersistidas();
+    }
 
     /**
-     * Máximo de partidos a los que se ingestarán cuotas por ejecución.
-     * Aunque haya 500+ partidos con análisis, la API solo permite 100 req/día
-     * y el análisis ya consume una parte. Este tope protege el cupo restante.
+     * Retorna SOLO los partidos que tienen análisis generado HOY.
+     *
+     * Regla de negocio: las cuotas solo tienen sentido donde hay análisis
+     * que calcule el edge real. Ingestar cuotas sin análisis desperdicia
+     * requests de API sin ningún valor (no hay sugerencias que mostrar).
+     *
+     * IMPORTANTE: ya NO existe fallback a "todos los partidos del día".
+     * Ese fallback causaba que el scheduler de las 7:30 AM consumiera ~40
+     * requests automáticamente cada mañana (uno por partido del día),
+     * dejando el presupuesto agotado antes de que el admin ejecutara el análisis.
+     *
+     * Flujo correcto:
+     *   1. Sincronizar partidos   (1 request — automático 6 AM)
+     *   2. Ejecutar análisis      (manual — admin selecciona ligas)
+     *   3. Ingestar cuotas        (manual o automático DESPUÉS del análisis)
      */
     private static final int MAX_PARTIDOS_A_INGESTAR = 30;
 
@@ -254,10 +346,9 @@ public class CuotaServicio {
         LocalDateTime inicioDia = LocalDate.now().atStartOfDay();
         LocalDateTime finDia    = LocalDate.now().atTime(23, 59, 59);
 
-        // Opción 1: partidos con análisis de hoy
         List<Analisis> analisisHoy = analisisRepositorio.findByCalculadoEnBetween(inicioDia, finDia);
         if (!analisisHoy.isEmpty()) {
-            log.info(">>> [CUOTAS] Usando {} análisis de hoy para determinar partidos a ingestar",
+            log.info(">>> [CUOTAS] {} análisis de hoy → determinando partidos a ingestar",
                     analisisHoy.size());
             return analisisHoy.stream()
                     .map(Analisis::getPartido)
@@ -268,21 +359,10 @@ public class CuotaServicio {
                     ));
         }
 
-        // Opción 2: partidos de hoy en BD (análisis aún no ejecutado)
-        List<Partido> partidosHoy = partidoRepositorio.findByFechaPartidoBetween(inicioDia, finDia)
-                .stream()
-                .filter(p -> p.getIdPartidoApi() != null)
-                .limit(MAX_PARTIDOS_SIN_ANALISIS)
-                .collect(Collectors.toList());
-
-        if (!partidosHoy.isEmpty()) {
-            log.info(">>> [CUOTAS] Sin análisis de hoy — usando {} partidos de hoy directamente " +
-                    "(ejecuta el motor de análisis después)", partidosHoy.size());
-            return partidosHoy;
-        }
-
-        log.warn(">>> [CUOTAS] Sin partidos ni análisis para hoy. " +
-                "Sincroniza primero los partidos del día.");
+        // Sin análisis → lista vacía. La ingesta abortará con motivo "SIN_PARTIDOS".
+        // NO se usa fallback a todos los partidos del día: eso consumía ~40 requests
+        // automáticamente en el scheduler de 7:30 AM sin ningún valor real.
+        log.warn(">>> [CUOTAS] Sin análisis de hoy. Ejecuta el motor de análisis primero.");
         return List.of();
     }
 
@@ -479,6 +559,30 @@ public class CuotaServicio {
                 resultado.put("paso4_muestra_mercados", cuotas.stream()
                         .map(CuotaExterna::getNombreMercado)
                         .distinct().limit(10).toList());
+
+                // ── Diagnóstico específico: ¿existe mercado de goles por equipo? ──
+                // "Goles Local Menos de 2.5" necesita que la API devuelva un mercado
+                // con nombre que contenga "home" y un umbral "over/under X.X".
+                // Si no existe, el sistema usará cuota sintética (no es un bug).
+                List<String> mercadosGolesEquipo = cuotas.stream()
+                        .map(CuotaExterna::getNombreMercado)
+                        .distinct()
+                        .filter(m -> {
+                            String ml = m.toLowerCase();
+                            return (ml.contains("home") || ml.contains("away"))
+                                    && (ml.contains("over") || ml.contains("under"))
+                                    && (ml.contains("goal") || ml.contains("0.5")
+                                        || ml.contains("1.5") || ml.contains("2.5")
+                                        || ml.contains("3.5"));
+                        })
+                        .sorted()
+                        .toList();
+
+                resultado.put("paso4_mercados_goles_equipo",
+                        mercadosGolesEquipo.isEmpty()
+                                ? "NINGUNO — la API no devuelve 'Home/Away Goals Over/Under' para esta liga/plan. " +
+                                  "'Goles Local Menos de X' usará cuota SINTÉTICA (normal en plan gratuito)."
+                                : mercadosGolesEquipo);
             }
         } catch (Exception e) {
             resultado.put("paso4_cuotasRecibidas", 0);
@@ -486,6 +590,143 @@ public class CuotaServicio {
         }
 
         return resultado;
+    }
+
+    // ─────────────────────────────────────────────────────────────────────────
+    // Budget
+    // ─────────────────────────────────────────────────────────────────────────
+
+    /**
+     * Devuelve el estado actual del presupuesto diario de requests de API-Football.
+     * El front-end lo usa para mostrar advertencias antes de ejecutar operaciones
+     * que consumen requests (análisis masivo, ingesta de cuotas).
+     *
+     * Campos devueltos:
+     *   requestsUsadosHoy              → requests consumidos hoy
+     *   requestsMaxDiarios             → límite total del plan (100 en plan gratuito)
+     *   requestsDisponiblesUsoGeneral  → disponibles para análisis (descontando reserva cuotas)
+     *   requestsDisponiblesParaCuotas  → disponibles para ingesta de cuotas
+     *   reservaCuotas                  → cupo reservado intocable para cuotas
+     *   porcentajeUsado                → % del cupo total ya consumido
+     *   nivelAlerta                    → "OK" | "ADVERTENCIA" | "CRITICO"
+     */
+    public Map<String, Object> estadoBudget() {
+        int usados      = gestorCache.contarRequestsHoy();
+        int maxDiario   = gestorCache.requestsMax();
+        int dispGeneral = gestorCache.requestsDisponiblesUsoGeneral();
+        int dispCuotas  = gestorCache.requestsDisponiblesParaCuotas();
+        int reserva     = gestorCache.reservaCuotas();
+        double pct      = maxDiario == 0 ? 0.0 : (usados * 100.0) / maxDiario;
+
+        String nivelAlerta;
+        if (dispGeneral <= 0) {
+            nivelAlerta = "CRITICO";
+        } else if (dispGeneral < 20) {
+            nivelAlerta = "ADVERTENCIA";
+        } else {
+            nivelAlerta = "OK";
+        }
+
+        Map<String, Object> r = new java.util.LinkedHashMap<>();
+        r.put("requestsUsadosHoy",              usados);
+        r.put("requestsMaxDiarios",             maxDiario);
+        r.put("requestsDisponiblesUsoGeneral",  dispGeneral);
+        r.put("requestsDisponiblesParaCuotas",  dispCuotas);
+        r.put("reservaCuotas",                  reserva);
+        r.put("porcentajeUsado",                Math.round(pct));
+        r.put("nivelAlerta",                    nivelAlerta);
+        if (!"OK".equals(nivelAlerta)) {
+            r.put("consejo", dispGeneral <= 0
+                    ? "Cupo para análisis agotado. Aún puedes ingestar cuotas (" + dispCuotas + " requests disponibles). Mañana se resetea el contador."
+                    : "Quedan pocos requests para análisis (" + dispGeneral + "). Considera ingestar cuotas primero antes de seguir analizando.");
+        }
+        return r;
+    }
+
+    // ─────────────────────────────────────────────────────────────────────────
+    // Diagnóstico raw (fixture específico)
+    // ─────────────────────────────────────────────────────────────────────────
+
+    /**
+     * Consulta la API directamente para un fixture ID específico y devuelve
+     * las cuotas parseadas. Consume 1 request del cupo diario.
+     *
+     * Útil para depurar por qué un partido concreto no tiene cuotas tras ingestar:
+     *   GET /api/cuotas/diagnostico-raw/1035047
+     *
+     * @param idApi el ID del fixture en API-Football (el idPartidoApi del partido en BD)
+     */
+    public Map<String, Object> diagnosticarCuotasRaw(String idApi) {
+        Map<String, Object> r = new java.util.LinkedHashMap<>();
+        r.put("idApiConsultado", idApi);
+
+        if (proveedorCuotas == null) {
+            r.put("error", "ProveedorCuotas no disponible. Verifica la configuración del proveedor.");
+            return r;
+        }
+
+        int usadosAntes = gestorCache.contarRequestsHoy();
+        r.put("requestsUsadosAntes", usadosAntes);
+
+        if (!gestorCache.puedeHacerRequestParaCuotas()) {
+            r.put("error", "Cupo diario agotado. No es posible hacer la consulta.");
+            r.put("requestsUsadosHoy", usadosAntes);
+            r.put("requestsMax",       gestorCache.requestsMax());
+            return r;
+        }
+
+        try {
+            List<CuotaExterna> cuotas = proveedorCuotas.obtenerCuotasPorPartido(idApi);
+            int usadosDespues = gestorCache.contarRequestsHoy();
+
+            r.put("requestsUsadosDespues", usadosDespues);
+            r.put("requestsConsumidos",    usadosDespues - usadosAntes);
+            r.put("totalCuotasRecibidas",  cuotas.size());
+
+            if (cuotas.isEmpty()) {
+                r.put("resultado", "SIN_CUOTAS");
+                r.put("detalle", "La API devolvió 0 cuotas para este fixture. " +
+                        "Causas posibles: (1) plan gratuito no incluye odds para esta liga, " +
+                        "(2) el partido aún no tiene cuotas publicadas (demasiado lejos en el futuro), " +
+                        "(3) el fixture ID es incorrecto.");
+            } else {
+                r.put("resultado", "OK");
+                r.put("casasDistintas", cuotas.stream()
+                        .map(CuotaExterna::getCasaApuestas).distinct().sorted().toList());
+
+                List<String> todosMercados = cuotas.stream()
+                        .map(CuotaExterna::getNombreMercado).distinct().sorted().toList();
+                r.put("totalMercadosDistintos", todosMercados.size());
+                r.put("mercadosDistintos", todosMercados);
+
+                // Filtrar mercados relevantes para "Goles Local / Goles Visitante"
+                List<String> mercadosGolesEquipo = todosMercados.stream()
+                        .filter(m -> {
+                            String ml = m.toLowerCase();
+                            return (ml.contains("home") || ml.contains("away"))
+                                    && (ml.contains("over") || ml.contains("under"))
+                                    && (ml.contains("goal") || ml.contains("0.5")
+                                        || ml.contains("1.5") || ml.contains("2.5")
+                                        || ml.contains("3.5"));
+                        })
+                        .toList();
+                r.put("mercados_goles_equipo", mercadosGolesEquipo.isEmpty()
+                        ? "NINGUNO — la API no incluye 'Home/Away Goals Over/Under' para esta liga. " +
+                          "Las sugerencias 'Goles Local/Visitante' usarán cuota sintética."
+                        : mercadosGolesEquipo);
+
+                r.put("muestraCuotas", cuotas.stream()
+                        .limit(30)
+                        .map(c -> c.getCasaApuestas() + " | " + c.getNombreMercado()
+                                + " → " + c.getValorCuota())
+                        .toList());
+            }
+        } catch (Exception e) {
+            r.put("resultado", "ERROR");
+            r.put("error",     e.getMessage());
+        }
+
+        return r;
     }
 
     // ─────────────────────────────────────────────────────────────────────────

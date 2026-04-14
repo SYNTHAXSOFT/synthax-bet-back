@@ -25,6 +25,14 @@ public interface AnalisisRepositorio extends JpaRepository<Analisis, Long> {
     @Modifying
     void deleteByPartidoIdIn(List<Long> idPartidos);
 
+    /** Elimina TODOS los análisis cuyo calculadoEn esté en el rango dado.
+     *  Se usa para limpiar el día completo antes de re-ejecutar con ligas seleccionadas. */
+    @Transactional
+    @Modifying
+    @Query("DELETE FROM Analisis a WHERE a.calculadoEn BETWEEN :inicio AND :fin")
+    void deleteByCalculadoEnBetween(@org.springframework.data.repository.query.Param("inicio") LocalDateTime inicio,
+                                    @org.springframework.data.repository.query.Param("fin")    LocalDateTime fin);
+
     List<Analisis> findByPartidoIdAndCategoriaMercado(Long idPartido, CategoriaAnalisis categoria);
 
     List<Analisis> findByNivelConfianzaAndProbabilidadGreaterThanEqual(

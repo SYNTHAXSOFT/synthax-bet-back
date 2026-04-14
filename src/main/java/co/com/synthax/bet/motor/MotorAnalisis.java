@@ -8,7 +8,6 @@ import co.com.synthax.bet.enums.CategoriaAnalisis;
 import co.com.synthax.bet.motor.calculadoras.CalculadoraCorners;
 import co.com.synthax.bet.motor.calculadoras.CalculadoraGoles;
 import co.com.synthax.bet.motor.calculadoras.CalculadoraMercadosAvanzados;
-import co.com.synthax.bet.motor.calculadoras.CalculadoraResultado;
 import co.com.synthax.bet.motor.calculadoras.CalculadoraTarjetas;
 import co.com.synthax.bet.proveedor.ProveedorFutbol;
 import co.com.synthax.bet.proveedor.modelo.EstadisticaExterna;
@@ -19,14 +18,17 @@ import com.fasterxml.jackson.databind.ObjectMapper;
 import lombok.RequiredArgsConstructor;
 import lombok.extern.slf4j.Slf4j;
 import org.springframework.beans.factory.annotation.Autowired;
+import org.springframework.beans.factory.annotation.Value;
 import org.springframework.stereotype.Service;
 
 import java.math.BigDecimal;
 import java.math.RoundingMode;
+import java.time.LocalDate;
 import java.util.ArrayList;
 import java.util.List;
 import java.util.Map;
 import java.util.Optional;
+import java.util.concurrent.atomic.AtomicInteger;
 
 /**
  * Orquestador principal del motor de análisis.
@@ -44,7 +46,6 @@ public class MotorAnalisis {
     private final CalculadoraGoles              calculadoraGoles;
     private final CalculadoraCorners            calculadoraCorners;
     private final CalculadoraTarjetas           calculadoraTarjetas;
-    private final CalculadoraResultado          calculadoraResultado;
     private final CalculadoraMercadosAvanzados  calculadoraMercadosAvanzados;
 
     private final EstadisticaEquipoRepositorio estadisticaEquipoRepositorio;
@@ -59,8 +60,37 @@ public class MotorAnalisis {
     @Autowired(required = false)
     private ProveedorFutbol proveedorFutbol;
 
-    // Temporada activa — en el futuro se puede leer desde application.properties
-    private static final String TEMPORADA_ACTUAL = "2024";
+    // ── Contadores de cache de stats por ejecución ──────────────────────────
+    // Permiten saber, al final de un análisis batch, cuántas estadísticas
+    // se sirvieron desde la BD (cache hit, 0 requests gastados) vs cuántas
+    // tuvieron que pedirse a la API (cache miss, 1 request por equipo).
+    // Son thread-safe (AtomicInteger) por si en el futuro se paraleliza.
+    private final AtomicInteger statsCacheHits   = new AtomicInteger(0);
+    private final AtomicInteger statsCacheMisses = new AtomicInteger(0);
+
+    /**
+     * Temporada activa. Se puede forzar via property `statbet.temporada.actual`
+     * (útil para backfills históricos). Si es "auto" o no se define, se calcula
+     * dinámicamente: las temporadas europeas van de agosto a mayo, por eso entre
+     * enero y julio la temporada vigente es la del año anterior.
+     *
+     * Ej: hoy 2026-04 → temporada = "2025" (temporada 2025-2026 todavía en curso)
+     *     hoy 2026-09 → temporada = "2026" (ya empezó la temporada 2026-2027)
+     */
+    @Value("${statbet.temporada.actual:auto}")
+    private String temporadaConfigurada;
+
+    private String resolverTemporada() {
+        if (temporadaConfigurada != null
+                && !temporadaConfigurada.isBlank()
+                && !"auto".equalsIgnoreCase(temporadaConfigurada)) {
+            return temporadaConfigurada;
+        }
+        LocalDate hoy = LocalDate.now();
+        int year = hoy.getYear();
+        // Enero–julio: la temporada europea vigente arrancó el año anterior.
+        return String.valueOf(hoy.getMonthValue() <= 7 ? year - 1 : year);
+    }
 
     /**
      * Analiza un partido completo y devuelve todos los análisis generados.
@@ -71,7 +101,7 @@ public class MotorAnalisis {
                 partido.getEquipoLocal(), partido.getEquipoVisitante(), partido.getLiga());
 
         String idLiga    = partido.getIdLigaApi();
-        String temporada = partido.getTemporada() != null ? partido.getTemporada() : TEMPORADA_ACTUAL;
+        String temporada = partido.getTemporada() != null ? partido.getTemporada() : resolverTemporada();
 
         EstadisticaEquipo statsLocal      = obtenerEstadisticas(partido.getIdEquipoLocalApi(),     idLiga, temporada);
         EstadisticaEquipo statsVisitante  = obtenerEstadisticas(partido.getIdEquipoVisitanteApi(), idLiga, temporada);
@@ -80,9 +110,25 @@ public class MotorAnalisis {
         // ── Construir todos los objetos en memoria (sin tocar la BD todavía) ──
         List<Analisis> porPersistir = new ArrayList<>();
 
-        porPersistir.addAll(construirMercados(
-                partido, CategoriaAnalisis.GOLES,
-                calculadoraGoles.calcular(statsLocal, statsVisitante)));
+        // CalculadoraGoles produce 1X2 + Doble Oportunidad + Over/Under + BTTS.
+        // Los separamos en dos categorías para que las sugerencias puedan
+        // distinguir entre mercados de RESULTADO y de GOLES sin mezclarlos.
+        // Se pasa la liga para que el factor local sea consistente con CalculadoraMercadosAvanzados
+        Map<String, Double> todosGoles = calculadoraGoles.calcular(statsLocal, statsVisitante, partido.getLiga());
+
+        // Resultado (1X2 y Doble Oportunidad) → categoría RESULTADO
+        Map<String, Double> mercadosResultado = new java.util.LinkedHashMap<>();
+        // Goles (Over/Under y BTTS) → categoría GOLES
+        Map<String, Double> mercadosGoles = new java.util.LinkedHashMap<>();
+        for (Map.Entry<String, Double> e : todosGoles.entrySet()) {
+            if (e.getKey().startsWith("1X2") || e.getKey().startsWith("Doble Oportunidad")) {
+                mercadosResultado.put(e.getKey(), e.getValue());
+            } else {
+                mercadosGoles.put(e.getKey(), e.getValue());
+            }
+        }
+        porPersistir.addAll(construirMercados(partido, CategoriaAnalisis.RESULTADO, mercadosResultado));
+        porPersistir.addAll(construirMercados(partido, CategoriaAnalisis.GOLES,     mercadosGoles));
 
         porPersistir.addAll(construirMercados(
                 partido, CategoriaAnalisis.CORNERS,
@@ -92,26 +138,28 @@ public class MotorAnalisis {
                 partido, CategoriaAnalisis.TARJETAS,
                 calculadoraTarjetas.calcular(statsLocal, statsVisitante, arbitro)));
 
-        porPersistir.addAll(construirMercados(
-                partido, CategoriaAnalisis.RESULTADO,
-                calculadoraResultado.calcular(statsLocal, statsVisitante)));
-
         // ── Fase 2: mercados avanzados ──────────────────────────────────────────
+        // Se pasa la liga del partido para ajustar el factor local según la competición.
+        String liga = partido.getLiga();
+
         porPersistir.addAll(construirMercados(
                 partido, CategoriaAnalisis.MARCADOR_EXACTO,
-                calculadoraMercadosAvanzados.calcularMarcadorExacto(statsLocal, statsVisitante)));
+                calculadoraMercadosAvanzados.calcularMarcadorExacto(statsLocal, statsVisitante, liga)));
 
         porPersistir.addAll(construirMercados(
                 partido, CategoriaAnalisis.GOLES,
-                calculadoraMercadosAvanzados.calcularGolesEquipo(statsLocal, statsVisitante)));
+                calculadoraMercadosAvanzados.calcularGolesEquipo(statsLocal, statsVisitante, liga)));
 
+        // Clean Sheet y Win to Nil → RESULTADO (son sobre el resultado del partido,
+        // no un marcador exacto; clasificarlos como MARCADOR_EXACTO los mezclaba
+        // con scores tipo "1-0" y dominaban esa categoría con probabilities altas).
         porPersistir.addAll(construirMercados(
-                partido, CategoriaAnalisis.MARCADOR_EXACTO,
-                calculadoraMercadosAvanzados.calcularCleanSheetYWinToNil(statsLocal, statsVisitante)));
+                partido, CategoriaAnalisis.RESULTADO,
+                calculadoraMercadosAvanzados.calcularCleanSheetYWinToNil(statsLocal, statsVisitante, liga)));
 
         porPersistir.addAll(construirMercados(
                 partido, CategoriaAnalisis.HANDICAP,
-                calculadoraMercadosAvanzados.calcularHandicapAsiatico(statsLocal, statsVisitante)));
+                calculadoraMercadosAvanzados.calcularHandicapAsiatico(statsLocal, statsVisitante, liga)));
 
         // ── Un único saveAll() por partido en lugar de N saves individuales ──
         try {
@@ -128,8 +176,14 @@ public class MotorAnalisis {
 
     /**
      * Analiza todos los partidos de una lista y devuelve el total de análisis generados.
+     *
+     * Resetea los contadores de hits/misses al inicio para que el reporte
+     * final sea exclusivo de este batch (y no acumule de ejecuciones previas).
      */
     public List<Analisis> analizarPartidos(List<Partido> partidos) {
+        statsCacheHits.set(0);
+        statsCacheMisses.set(0);
+
         List<Analisis> todos = new ArrayList<>();
         for (Partido partido : partidos) {
             try {
@@ -139,6 +193,17 @@ public class MotorAnalisis {
                         partido.getEquipoLocal(), partido.getEquipoVisitante(), e.getMessage());
             }
         }
+
+        // Reporte de cache al finalizar el batch — útil para entender por qué
+        // un análisis quemó muchos o pocos requests del cupo diario.
+        int hits   = statsCacheHits.get();
+        int misses = statsCacheMisses.get();
+        int total  = hits + misses;
+        double tasaHit = total == 0 ? 0.0 : (hits * 100.0) / total;
+        log.info(">>> [STATS CACHE] Resumen del análisis: {} consultas | " +
+                 "{} HITs (BD, 0 requests) | {} MISSes (API, {} requests) | tasa hit: {}%",
+                total, hits, misses, misses, String.format("%.1f", tasaHit));
+
         return todos;
     }
 
@@ -173,39 +238,110 @@ public class MotorAnalisis {
 
     /**
      * Obtiene estadísticas del equipo:
-     * 1. Primero busca en la BD (cache persistente).
+     * 1. Primero busca en la BD (cache persistente entre ejecuciones).
      * 2. Si no están, las pide a la API externa, las persiste y las retorna.
      * 3. Si no hay proveedor o la API falla, retorna null (calculadoras usan defaults).
+     *
+     * Cada llamada actualiza los contadores de hit/miss para que al final del
+     * batch sepamos cuántos requests se ahorraron por cache.
      */
     private EstadisticaEquipo obtenerEstadisticas(String idEquipo, String idLiga, String temporada) {
         if (idEquipo == null) return null;
 
-        // 1. Buscar en BD
+        // 1. Buscar en BD (cache HIT cuesta 0 requests de API)
         Optional<EstadisticaEquipo> enBd =
                 estadisticaEquipoRepositorio.findByIdEquipoAndTemporada(idEquipo, temporada);
-        if (enBd.isPresent()) {
-            log.debug(">>> BD HIT: estadísticas equipo {} temporada {}", idEquipo, temporada);
-            return enBd.get();
+
+        // Referencia al registro existente para usarlo como fallback de seguridad.
+        // NUNCA se borra hasta confirmar que los datos nuevos de la API son válidos.
+        // Si la API falla durante un re-fetch, se retorna el registro existente (aunque
+        // incompleto) en lugar de dejar el equipo sin estadísticas para el resto del día.
+        EstadisticaEquipo existente = enBd.orElse(null);
+
+        if (existente != null) {
+            // Re-fetch si faltan campos calculados con mejoras posteriores.
+            // Condiciones de re-fetch acumulativas (cada una refleja una mejora del sistema):
+            //   1. promedioGolesFavorCasa    → split casa/visita
+            //   2. promedioGolesFavorReciente → forma reciente / decay temporal
+            // Al agregar aquí una condición nueva, todos los registros sin ese campo
+            // se re-fetchan automáticamente en el próximo análisis.
+            boolean camposCompletos = existente.getPromedioGolesFavorCasa() != null
+                    && existente.getPromedioGolesFavorReciente() != null;
+            if (camposCompletos) {
+                statsCacheHits.incrementAndGet();
+                log.info(">>> [STATS HIT] equipo {} temporada {} (BD, 0 requests)", idEquipo, temporada);
+                return existente;
+            }
+            log.info(">>> [STATS RE-FETCH] equipo {} — faltan campos, re-consultando API (registro existente conservado como fallback)",
+                    idEquipo);
+            // NO borramos aquí — solo borramos si el re-fetch es exitoso (ver abajo)
         }
 
-        // 2. Pedir a la API y persistir
+        // 2. Cache MISS o re-fetch → pedir a la API y persistir (gasta 1 request)
+        statsCacheMisses.incrementAndGet();
+        log.info(">>> [STATS MISS] equipo {} temporada {} (consulta API, 1 request)",
+                idEquipo, temporada);
+
         if (proveedorFutbol != null && idLiga != null) {
             try {
                 EstadisticaExterna ext =
                         proveedorFutbol.obtenerEstadisticasEquipo(idEquipo, idLiga, temporada);
 
                 if (ext != null && ext.getPartidosAnalizados() != null && ext.getPartidosAnalizados() >= 3) {
-                    EstadisticaEquipo nueva = mapearYPersistir(ext, idEquipo, temporada);
+                    // SAFE RE-FETCH: pasamos 'existente' para que mapearYPersistir reutilice
+                    // su ID y haga un UPDATE en lugar de INSERT (evita constraint violation).
+                    // El registro viejo solo desaparece si el save() es exitoso.
+                    EstadisticaEquipo nueva = mapearYPersistir(ext, idEquipo, temporada, existente);
                     log.info(">>> Estadísticas del equipo {} persistidas ({} partidos)",
                             ext.getNombreEquipo(), ext.getPartidosAnalizados());
                     return nueva;
-                } else {
-                    log.warn(">>> API devolvió datos insuficientes para equipo {} (partidos: {})",
-                            idEquipo, ext != null ? ext.getPartidosAnalizados() : 0);
                 }
+
+                // Fallback 1: competencia internacional (Libertadores, Champions, etc.) con pocos partidos.
+                log.info(">>> Datos insuficientes en liga {} temporada {} ({} partidos) — buscando liga doméstica",
+                        idLiga, temporada, ext != null ? ext.getPartidosAnalizados() : 0);
+
+                String idLigaDomestica = proveedorFutbol.obtenerIdLigaDomestica(idEquipo, temporada);
+                if (idLigaDomestica != null && !idLigaDomestica.equals(idLiga)) {
+                    EstadisticaExterna extDom =
+                            proveedorFutbol.obtenerEstadisticasEquipo(idEquipo, idLigaDomestica, temporada);
+                    if (extDom != null && extDom.getPartidosAnalizados() != null
+                            && extDom.getPartidosAnalizados() >= 3) {
+                        EstadisticaEquipo nueva = mapearYPersistir(extDom, idEquipo, temporada, existente);
+                        log.info(">>> Estadísticas de {} obtenidas desde liga doméstica {} ({} partidos)",
+                                extDom.getNombreEquipo(), idLigaDomestica, extDom.getPartidosAnalizados());
+                        return nueva;
+                    }
+                }
+
+                // Fallback 2: ligas de año calendario (Colombia, Brasil, Argentina...).
+                String temporadaAlterna = String.valueOf(Integer.parseInt(temporada) + 1);
+                log.info(">>> Reintentando con temporada alterna {} en liga doméstica", temporadaAlterna);
+
+                String idLigaDomAlterna = idLigaDomestica != null ? idLigaDomestica : idLiga;
+                EstadisticaExterna extAlterna =
+                        proveedorFutbol.obtenerEstadisticasEquipo(idEquipo, idLigaDomAlterna, temporadaAlterna);
+
+                if (extAlterna != null && extAlterna.getPartidosAnalizados() != null
+                        && extAlterna.getPartidosAnalizados() >= 3) {
+                    EstadisticaEquipo nueva = mapearYPersistir(extAlterna, idEquipo, temporadaAlterna, existente);
+                    log.info(">>> Estadísticas de {} persistidas con temporada alterna {} ({} partidos)",
+                            extAlterna.getNombreEquipo(), temporadaAlterna, extAlterna.getPartidosAnalizados());
+                    return nueva;
+                }
+
+                log.warn(">>> Sin datos suficientes para equipo {} tras todos los fallbacks", idEquipo);
+
             } catch (Exception e) {
                 log.error(">>> Error obteniendo estadísticas externas para equipo {}: {}", idEquipo, e.getMessage());
             }
+        }
+
+        // Si llegamos aquí con datos existentes (re-fetch fallido), retornar lo que había.
+        // Mejor predicción con datos incompletos que predicción con defaults genéricos.
+        if (existente != null) {
+            log.warn(">>> Re-fetch fallido para equipo {} — usando registro existente de BD como fallback", idEquipo);
+            return existente;
         }
 
         log.debug(">>> Sin estadísticas disponibles para equipo {} - usando defaults del motor", idEquipo);
@@ -215,9 +351,16 @@ public class MotorAnalisis {
     /**
      * Convierte EstadisticaExterna (modelo del proveedor) a EstadisticaEquipo (entidad JPA)
      * y la persiste en la BD para futuros usos sin consumir más requests de la API.
+     *
+     * @param existente registro previo en BD (puede ser null si es primera vez).
+     *                  Si no es null, se reutiliza su ID para hacer UPDATE en lugar de INSERT,
+     *                  evitando violación de la constraint unique (idEquipo, temporada).
+     *                  El registro antiguo solo se "pierde" si este save() tiene éxito.
      */
-    private EstadisticaEquipo mapearYPersistir(EstadisticaExterna ext, String idEquipo, String temporada) {
-        EstadisticaEquipo entity = new EstadisticaEquipo();
+    private EstadisticaEquipo mapearYPersistir(EstadisticaExterna ext, String idEquipo,
+                                               String temporada, EstadisticaEquipo existente) {
+        // Reutilizar el registro existente (UPDATE) o crear uno nuevo (INSERT)
+        EstadisticaEquipo entity = existente != null ? existente : new EstadisticaEquipo();
         entity.setIdEquipo(idEquipo);
         entity.setNombreEquipo(ext.getNombreEquipo());
         entity.setTemporada(temporada);
@@ -230,6 +373,22 @@ public class MotorAnalisis {
             entity.setPromedioGolesContra(
                     BigDecimal.valueOf(ext.getPromedioGolesContra()).setScale(2, RoundingMode.HALF_UP));
 
+        if (ext.getPromedioGolesFavorCasa() != null)
+            entity.setPromedioGolesFavorCasa(
+                    BigDecimal.valueOf(ext.getPromedioGolesFavorCasa()).setScale(2, RoundingMode.HALF_UP));
+
+        if (ext.getPromedioGolesFavorVisita() != null)
+            entity.setPromedioGolesFavorVisita(
+                    BigDecimal.valueOf(ext.getPromedioGolesFavorVisita()).setScale(2, RoundingMode.HALF_UP));
+
+        if (ext.getPromedioGolesContraCasa() != null)
+            entity.setPromedioGolesContraCasa(
+                    BigDecimal.valueOf(ext.getPromedioGolesContraCasa()).setScale(2, RoundingMode.HALF_UP));
+
+        if (ext.getPromedioGolesContraVisita() != null)
+            entity.setPromedioGolesContraVisita(
+                    BigDecimal.valueOf(ext.getPromedioGolesContraVisita()).setScale(2, RoundingMode.HALF_UP));
+
         if (ext.getPromedioCornersFavor() != null)
             entity.setPromedioCornersFavor(
                     BigDecimal.valueOf(ext.getPromedioCornersFavor()).setScale(2, RoundingMode.HALF_UP));
@@ -241,6 +400,14 @@ public class MotorAnalisis {
         if (ext.getPromedioTarjetasAmarillas() != null)
             entity.setPromedioTarjetas(
                     BigDecimal.valueOf(ext.getPromedioTarjetasAmarillas()).setScale(2, RoundingMode.HALF_UP));
+
+        if (ext.getPromedioTarjetasCasa() != null)
+            entity.setPromedioTarjetasCasa(
+                    BigDecimal.valueOf(ext.getPromedioTarjetasCasa()).setScale(2, RoundingMode.HALF_UP));
+
+        if (ext.getPromedioTarjetasVisita() != null)
+            entity.setPromedioTarjetasVisita(
+                    BigDecimal.valueOf(ext.getPromedioTarjetasVisita()).setScale(2, RoundingMode.HALF_UP));
 
         if (ext.getPromedioTiros() != null)
             entity.setPromedioTiros(
@@ -258,6 +425,15 @@ public class MotorAnalisis {
             entity.setPorcentajeOver25(
                     BigDecimal.valueOf(ext.getPorcentajeOver25()).setScale(4, RoundingMode.HALF_UP));
 
+        // Forma reciente — para decay temporal (últimos ~10 partidos)
+        if (ext.getPromedioGolesFavorReciente() != null)
+            entity.setPromedioGolesFavorReciente(
+                    BigDecimal.valueOf(ext.getPromedioGolesFavorReciente()).setScale(2, RoundingMode.HALF_UP));
+
+        if (ext.getPromedioGolesContraReciente() != null)
+            entity.setPromedioGolesContraReciente(
+                    BigDecimal.valueOf(ext.getPromedioGolesContraReciente()).setScale(2, RoundingMode.HALF_UP));
+
         return estadisticaEquipoRepositorio.save(entity);
     }
 
@@ -268,13 +444,15 @@ public class MotorAnalisis {
 
     private String construirSnapshotJson(Partido partido, CategoriaAnalisis categoria) {
         try {
+            String temporadaReal = partido.getTemporada() != null
+                    ? partido.getTemporada() : resolverTemporada();
             Map<String, Object> snapshot = Map.of(
                     "idPartido",       partido.getId() != null ? partido.getId() : 0,
                     "equipoLocal",     partido.getEquipoLocal(),
                     "equipoVisitante", partido.getEquipoVisitante(),
                     "arbitro",         partido.getArbitro() != null ? partido.getArbitro() : "",
                     "categoria",       categoria.name(),
-                    "temporada",       TEMPORADA_ACTUAL
+                    "temporada",       temporadaReal
             );
             return objectMapper.writeValueAsString(snapshot);
         } catch (Exception e) {

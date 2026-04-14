@@ -128,17 +128,21 @@ public class ApiFootballMapper {
 
         if (totalGames < 3) return ext; // Sin suficientes datos
 
-        // Promedios de goles (string "1.9" → double)
+        // Promedios de goles — total + split casa/visita
         if (dto.getGoals() != null) {
             if (dto.getGoals().getGoalsFor() != null
                     && dto.getGoals().getGoalsFor().getAverage() != null) {
-                ext.setPromedioGolesFavor(
-                        parseDouble(dto.getGoals().getGoalsFor().getAverage().getTotal()));
+                ApiFootballTeamStatsDTO.GoalAverage avgFor = dto.getGoals().getGoalsFor().getAverage();
+                ext.setPromedioGolesFavor(parseDouble(avgFor.getTotal()));
+                ext.setPromedioGolesFavorCasa(parseDouble(avgFor.getHome()));
+                ext.setPromedioGolesFavorVisita(parseDouble(avgFor.getAway()));
             }
             if (dto.getGoals().getAgainst() != null
                     && dto.getGoals().getAgainst().getAverage() != null) {
-                ext.setPromedioGolesContra(
-                        parseDouble(dto.getGoals().getAgainst().getAverage().getTotal()));
+                ApiFootballTeamStatsDTO.GoalAverage avgAgainst = dto.getGoals().getAgainst().getAverage();
+                ext.setPromedioGolesContra(parseDouble(avgAgainst.getTotal()));
+                ext.setPromedioGolesContraCasa(parseDouble(avgAgainst.getHome()));
+                ext.setPromedioGolesContraVisita(parseDouble(avgAgainst.getAway()));
             }
         }
 

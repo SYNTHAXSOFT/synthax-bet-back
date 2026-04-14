@@ -45,19 +45,25 @@ public class TareasDiarias {
     }
 
     /**
-     * Ingestiona las cuotas del día a las 7:30 AM.
-     * Se ejecuta 90 minutos después de sincronizar partidos para asegurar
-     * que la tabla partidos ya tenga los datos del día.
+     * Intenta ingestar cuotas a las 7:30 AM como conveniencia.
      *
-     * Consume 1 request de API-Football por partido del día.
-     * Las cuotas quedan disponibles para el cálculo de edge en SugerenciaServicio.
+     * COMPORTAMIENTO: si el admin NO ha ejecutado el análisis antes de las 7:30 AM,
+     * esta tarea aborta automáticamente sin consumir ningún request (motivo: SIN_PARTIDOS).
+     * Solo consume requests si ya hay análisis generados hoy (caso de análisis nocturno).
+     *
+     * En uso normal el admin ejecuta el análisis manualmente durante el día y luego
+     * ingestiona cuotas desde la UI. Esta tarea es un complemento, no el flujo principal.
      */
     @Scheduled(cron = "0 30 7 * * *")
     public void ingestarCuotasDelDia() {
-        log.info(">>> [TAREA DIARIA] Iniciando ingesta de cuotas - {}", LocalDate.now());
+        log.info(">>> [TAREA DIARIA] Verificando ingesta de cuotas - {}", LocalDate.now());
         try {
             int total = cuotaServicio.ingestarCuotasDelDia();
-            log.info(">>> [TAREA DIARIA] Cuotas ingresadas: {} - {}", total, LocalTime.now());
+            if (total > 0) {
+                log.info(">>> [TAREA DIARIA] Cuotas ingresadas: {} - {}", total, LocalTime.now());
+            } else {
+                log.info(">>> [TAREA DIARIA] Ingesta abortada (sin análisis previo) — 0 requests consumidos");
+            }
         } catch (Exception e) {
             log.error(">>> [TAREA DIARIA] Error al ingestar cuotas: {}", e.getMessage());
         }

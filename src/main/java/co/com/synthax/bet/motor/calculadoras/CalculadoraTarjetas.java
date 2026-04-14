@@ -85,15 +85,27 @@ public class CalculadoraTarjetas {
                                            EstadisticaEquipo statsVisitante) {
         if (statsLocal == null && statsVisitante == null) return PROMEDIO_TARJETAS_LIGA;
 
-        double tarjetasLocal = statsLocal != null && statsLocal.getPromedioTarjetas() != null
-                ? statsLocal.getPromedioTarjetas().doubleValue()
-                : PROMEDIO_TARJETAS_LIGA / 2;
+        // Preferir el promedio en casa para el local; fallback al total de temporada
+        double tarjetasLocal = valorPrioritario(
+                statsLocal != null ? statsLocal.getPromedioTarjetasCasa()   : null,
+                statsLocal != null ? statsLocal.getPromedioTarjetas()        : null,
+                PROMEDIO_TARJETAS_LIGA / 2);
 
-        double tarjetasVisitante = statsVisitante != null && statsVisitante.getPromedioTarjetas() != null
-                ? statsVisitante.getPromedioTarjetas().doubleValue()
-                : PROMEDIO_TARJETAS_LIGA / 2;
+        // Preferir el promedio de visita para el visitante; fallback al total
+        double tarjetasVisitante = valorPrioritario(
+                statsVisitante != null ? statsVisitante.getPromedioTarjetasVisita() : null,
+                statsVisitante != null ? statsVisitante.getPromedioTarjetas()        : null,
+                PROMEDIO_TARJETAS_LIGA / 2);
 
         return tarjetasLocal + tarjetasVisitante;
+    }
+
+    private double valorPrioritario(java.math.BigDecimal prioritario,
+                                    java.math.BigDecimal fallback,
+                                    double defecto) {
+        if (prioritario != null) return prioritario.doubleValue();
+        if (fallback    != null) return fallback.doubleValue();
+        return defecto;
     }
 
     private double calcularProbabilidadOver(double lambda, double linea) {

@@ -40,6 +40,17 @@ public interface ProveedorFutbol {
     }
 
     /**
+     * Devuelve el ID de la liga doméstica de un equipo en una temporada.
+     * Útil para obtener estadísticas reales cuando el partido es de una competencia
+     * internacional (Libertadores, Sudamericana, Champions, etc.) donde el equipo
+     * ha jugado pocos partidos y los stats no son representativos.
+     * Por defecto devuelve null (proveedor no soporta esta consulta).
+     */
+    default String obtenerIdLigaDomestica(String idEquipo, String temporada) {
+        return null;
+    }
+
+    /**
      * Historial de enfrentamientos directos entre dos equipos.
      */
     List<PartidoExterno> obtenerHistorialH2H(String idLocal, String idVisitante);

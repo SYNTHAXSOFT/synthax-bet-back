@@ -41,4 +41,13 @@ public interface PartidoRepositorio extends JpaRepository<Partido, Long> {
      */
     List<Partido> findByFechaPartidoBetweenAndIdLigaApiIn(
             LocalDateTime desde, LocalDateTime hasta, List<String> ligaIds);
+
+    /**
+     * Elimina todos los partidos cuya fechaPartido esté en el rango dado.
+     * Se usa en sincronizarPartidos() para limpiar registros con timezone
+     * incorrecto antes de insertar datos frescos desde la API.
+     */
+    @org.springframework.transaction.annotation.Transactional
+    @org.springframework.data.jpa.repository.Modifying
+    void deleteByFechaPartidoBetween(LocalDateTime desde, LocalDateTime hasta);
 }

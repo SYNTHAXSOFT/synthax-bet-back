@@ -1,6 +1,7 @@
 package co.com.synthax.bet.entity;
 
 import co.com.synthax.bet.enums.CanalPick;
+import co.com.synthax.bet.enums.CategoriaAnalisis;
 import co.com.synthax.bet.enums.ResultadoPick;
 import jakarta.persistence.*;
 import lombok.AllArgsConstructor;
@@ -35,7 +36,7 @@ public class Pick {
     @Column(name = "probabilidad", precision = 5, scale = 4)
     private BigDecimal probabilidad;  // probabilidad calculada por el motor
 
-    @Column(name = "valor_cuota", precision = 6, scale = 3)
+    @Column(name = "valor_cuota", precision = 10, scale = 3)
     private BigDecimal valorCuota;  // cuota en la casa de apuestas
 
     @Column(name = "casa_apuestas")
@@ -54,6 +55,15 @@ public class Pick {
 
     @Column(name = "liquidado_en")
     private LocalDateTime liquidadoEn;
+
+    /** Edge (ventaja estadística) con que se publicó el pick, ej: 0.12 = 12% */
+    @Column(name = "edge", precision = 6, scale = 4)
+    private BigDecimal edge;
+
+    /** Categoría del mercado: GOLES, CORNERS, TARJETAS, etc. */
+    @Enumerated(EnumType.STRING)
+    @Column(name = "categoria_mercado")
+    private CategoriaAnalisis categoriaMercado;
 
     // Blockchain (Diferencial #2)
     @Column(name = "hash_blockchain")

@@ -53,4 +53,15 @@ public class SugerenciaControlador {
         log.info(">>> GET /sugerencias/ligas");
         return ResponseEntity.ok(sugerenciaServicio.obtenerLigasDisponibles());
     }
+
+    /**
+     * GET /sugerencias/equipos
+     * Devuelve los equipos únicos (locales y visitantes) del análisis más reciente.
+     * Se usa para poblar el select buscable de "Equipo" en "Personalizar Sugerencias".
+     */
+    @GetMapping("/equipos")
+    public ResponseEntity<List<String>> equiposDisponibles() {
+        log.info(">>> GET /sugerencias/equipos");
+        return ResponseEntity.ok(sugerenciaServicio.obtenerEquiposDisponibles());
+    }
 }

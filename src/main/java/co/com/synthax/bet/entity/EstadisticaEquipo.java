@@ -29,12 +29,25 @@ public class EstadisticaEquipo {
     @Column(name = "temporada", nullable = false)
     private String temporada;
 
-    // Goles
+    // Goles — promedio total de temporada
     @Column(name = "promedio_goles_favor", precision = 5, scale = 2)
     private BigDecimal promedioGolesFavor;
 
     @Column(name = "promedio_goles_contra", precision = 5, scale = 2)
     private BigDecimal promedioGolesContra;
+
+    // Goles — split casa / visita (más preciso para el modelo Poisson)
+    @Column(name = "promedio_goles_favor_casa", precision = 5, scale = 2)
+    private BigDecimal promedioGolesFavorCasa;
+
+    @Column(name = "promedio_goles_favor_visita", precision = 5, scale = 2)
+    private BigDecimal promedioGolesFavorVisita;
+
+    @Column(name = "promedio_goles_contra_casa", precision = 5, scale = 2)
+    private BigDecimal promedioGolesContraCasa;
+
+    @Column(name = "promedio_goles_contra_visita", precision = 5, scale = 2)
+    private BigDecimal promedioGolesContraVisita;
 
     // Corners
     @Column(name = "promedio_corners_favor", precision = 5, scale = 2)
@@ -43,9 +56,16 @@ public class EstadisticaEquipo {
     @Column(name = "promedio_corners_contra", precision = 5, scale = 2)
     private BigDecimal promedioCornersContra;
 
-    // Tarjetas
+    // Tarjetas — total temporada
     @Column(name = "promedio_tarjetas", precision = 5, scale = 2)
     private BigDecimal promedioTarjetas;
+
+    // Tarjetas — split casa / visita (calculado desde historial de fixtures)
+    @Column(name = "promedio_tarjetas_casa", precision = 5, scale = 2)
+    private BigDecimal promedioTarjetasCasa;
+
+    @Column(name = "promedio_tarjetas_visita", precision = 5, scale = 2)
+    private BigDecimal promedioTarjetasVisita;
 
     // Tiros
     @Column(name = "promedio_tiros", precision = 5, scale = 2)
@@ -61,6 +81,15 @@ public class EstadisticaEquipo {
 
     @Column(name = "porcentaje_over25", precision = 5, scale = 4)
     private BigDecimal porcentajeOver25;
+
+    // Forma reciente — goles promedio de los últimos 10 partidos completados.
+    // Calculados desde el historial de fixtures durante el enriquecimiento de stats.
+    // Permite el decay temporal en los modelos Poisson (blend 75% temporada / 25% reciente).
+    @Column(name = "promedio_goles_favor_reciente", precision = 5, scale = 2)
+    private BigDecimal promedioGolesFavorReciente;
+
+    @Column(name = "promedio_goles_contra_reciente", precision = 5, scale = 2)
+    private BigDecimal promedioGolesContraReciente;
 
     @Column(name = "ultima_actualizacion")
     private LocalDateTime ultimaActualizacion;

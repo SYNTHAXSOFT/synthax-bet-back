@@ -28,6 +28,21 @@ public class CalculadoraCorners {
     public Map<String, Double> calcular(EstadisticaEquipo statsLocal,
                                         EstadisticaEquipo statsVisitante) {
 
+        // Los datos de corners se obtienen desde /fixtures/statistics (últimos 10 partidos).
+        // Si ningún equipo tiene datos reales no calculamos: es mejor no sugerir que
+        // usar un baseline fijo igual para todos los partidos (genera edge falso).
+        boolean hayDatosLocal = statsLocal != null
+                && (statsLocal.getPromedioCornersFavor() != null
+                    || statsLocal.getPromedioCornersContra() != null);
+        boolean hayDatosVisit = statsVisitante != null
+                && (statsVisitante.getPromedioCornersFavor() != null
+                    || statsVisitante.getPromedioCornersContra() != null);
+
+        if (!hayDatosLocal && !hayDatosVisit) {
+            log.debug(">>> Sin datos reales de corners para ningún equipo — mercado omitido");
+            return Map.of();
+        }
+
         Map<String, Double> probabilidades = new HashMap<>();
 
         double cornersEsperados = calcularCornersEsperados(statsLocal, statsVisitante);

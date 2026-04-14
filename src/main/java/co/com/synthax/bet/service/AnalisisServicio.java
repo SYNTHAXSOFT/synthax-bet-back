@@ -118,11 +118,19 @@ public class AnalisisServicio {
             return List.of();
         }
 
-        List<Long> idsPartidos = partidos.stream().map(Partido::getId).toList();
-
-        long eliminados = analisisRepositorio.findByPartidoIdIn(idsPartidos).size();
-        analisisRepositorio.deleteByPartidoIdIn(idsPartidos);
-        log.info(">>> {} análisis anteriores eliminados antes de re-ejecutar", eliminados);
+        // Borrar TODO el análisis del día actual antes de insertar el nuevo.
+        //
+        // ¿Por qué no solo deleteByPartidoIdIn(idsPartidos)?
+        // Porque si el admin ejecutó antes un análisis para otras ligas (mismo día),
+        // esos registros quedan en la BD y contaminarían las sugerencias mezclando
+        // ligas no seleccionadas con las nuevas. Borrar todo el día garantiza que
+        // la BD siempre refleja ÚNICAMENTE la última selección del admin.
+        java.time.LocalDateTime inicioDia = java.time.LocalDate.now().atStartOfDay();
+        java.time.LocalDateTime finDia    = java.time.LocalDate.now().atTime(23, 59, 59);
+        long eliminados = analisisRepositorio.findByCalculadoEnBetween(inicioDia, finDia).size();
+        analisisRepositorio.deleteByCalculadoEnBetween(inicioDia, finDia);
+        log.info(">>> {} análisis del día eliminados — preparando nueva ejecución para {} ligas seleccionadas",
+                eliminados, ligaIds != null && !ligaIds.isEmpty() ? ligaIds.size() : "todas");
 
         log.info(">>> Re-ejecutando motor para {} partidos", partidos.size());
         return motorAnalisis.analizarPartidos(partidos);
