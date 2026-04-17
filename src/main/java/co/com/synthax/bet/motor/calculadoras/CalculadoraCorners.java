@@ -48,7 +48,15 @@ public class CalculadoraCorners {
         double cornersEsperados = calcularCornersEsperados(statsLocal, statsVisitante);
         log.debug(">>> Corners esperados en el partido: {}", cornersEsperados);
 
-        // Usar distribución de Poisson para corners (misma lógica que goles)
+        // Usar distribución de Poisson para corners (misma lógica que goles).
+        // Rango ampliado: 5.5 – 13.5 para capturar tanto partidos muy defensivos
+        // (λ ≈ 6-8 corners) como muy atacantes (λ ≈ 12-14 corners).
+        // Los filtros de probabilidad (≥62%) y cuota mínima (≥1.15) en SugerenciaServicio
+        // descartan automáticamente los mercados triviales (ej: Over 5.5 en λ=12 → 99%).
+        probabilidades.put("Over 5.5 Corners",  calcularProbabilidadOver(cornersEsperados, 5.5));
+        probabilidades.put("Under 5.5 Corners", 1.0 - probabilidades.get("Over 5.5 Corners"));
+        probabilidades.put("Over 6.5 Corners",  calcularProbabilidadOver(cornersEsperados, 6.5));
+        probabilidades.put("Under 6.5 Corners", 1.0 - probabilidades.get("Over 6.5 Corners"));
         probabilidades.put("Over 7.5 Corners",  calcularProbabilidadOver(cornersEsperados, 7.5));
         probabilidades.put("Under 7.5 Corners", 1.0 - probabilidades.get("Over 7.5 Corners"));
         probabilidades.put("Over 8.5 Corners",  calcularProbabilidadOver(cornersEsperados, 8.5));
@@ -59,6 +67,10 @@ public class CalculadoraCorners {
         probabilidades.put("Under 10.5 Corners",1.0 - probabilidades.get("Over 10.5 Corners"));
         probabilidades.put("Over 11.5 Corners", calcularProbabilidadOver(cornersEsperados, 11.5));
         probabilidades.put("Under 11.5 Corners",1.0 - probabilidades.get("Over 11.5 Corners"));
+        probabilidades.put("Over 12.5 Corners", calcularProbabilidadOver(cornersEsperados, 12.5));
+        probabilidades.put("Under 12.5 Corners",1.0 - probabilidades.get("Over 12.5 Corners"));
+        probabilidades.put("Over 13.5 Corners", calcularProbabilidadOver(cornersEsperados, 13.5));
+        probabilidades.put("Under 13.5 Corners",1.0 - probabilidades.get("Over 13.5 Corners"));
 
         log.debug(">>> {} mercados de corners calculados", probabilidades.size());
         return probabilidades;

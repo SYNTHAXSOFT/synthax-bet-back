@@ -175,6 +175,25 @@ public class GestorCache {
     }
 
     /**
+     * Verifica si hay requests disponibles para resolver picks pendientes.
+     *
+     * Usa el mismo umbral mínimo que las cuotas (MARGEN_MINIMO) para que la
+     * resolución funcione aunque el budget de análisis general esté agotado.
+     * La resolución es crítica — si no se ejecuta, los picks quedan PENDIENTE
+     * indefinidamente aunque los partidos ya hayan terminado.
+     */
+    public boolean puedeHacerRequestParaResolucion() {
+        reiniciarContadorSiEsNuevoDia();
+        int disponibles = requestsMax - contadorRequests.get();
+        boolean puede   = disponibles > MARGEN_MINIMO;
+        if (!puede) {
+            log.warn(">>> Sin cupo para resolver picks: {}/{} requests usados — picks quedarán PENDIENTE",
+                    contadorRequests.get(), requestsMax);
+        }
+        return puede;
+    }
+
+    /**
      * Devuelve el total de requests disponibles para uso general (descontando
      * la reserva de cuotas). Útil para mostrar en UI cuántos quedan para
      * análisis sin afectar la ingesta de cuotas posterior.

@@ -37,6 +37,9 @@ public interface PickRepositorio extends JpaRepository<Pick, Long> {
 
     List<Pick> findByPartidoId(Long idPartido);
 
+    /** Verifica si ya existe un pick para el mismo partido y mercado (evita duplicados). */
+    boolean existsByPartidoIdAndNombreMercado(Long partidoId, String nombreMercado);
+
     /** Elimina todos los picks de una lista de partidos. */
     @org.springframework.transaction.annotation.Transactional
     @org.springframework.data.jpa.repository.Modifying

@@ -30,4 +30,8 @@ public class PartidoExterno {
     private String logoLocal;
     private String logoVisitante;
     private String ronda;
+
+    /** Goles marcados — disponible cuando el partido ya está FINALIZADO en la API. */
+    private Integer golesLocal;
+    private Integer golesVisitante;
 }

@@ -59,25 +59,53 @@ public class SugerenciaServicio {
     // 1.15 permite mercados de alta probabilidad con edge positivo real.
     private static final double CUOTA_MIN_PATA_REAL = 1.15;
 
+    // ── Cuota mínima para RESULTADO (1X2, Doble Oportunidad) ──────────────────
+    // Los picks de resultado con cuota @1.10–1.29 no vale la pena sugerirlos:
+    // el pago es tan bajo que el riesgo de perder (un empate inesperado, por ejemplo)
+    // no está justificado. Se exige al menos @1.30 para que el pick sea accionable.
+    // Ejemplo filtrado: "Doble Oportunidad 12" @1.22 con edge -2.1% → no aparece.
+    // Ejemplo que pasa: "1X2 - Local" @1.45, "Doble Oportunidad 1X" @1.35.
+    private static final double CUOTA_MIN_PATA_RESULTADO = 1.30;
+
     // ── Edge mínimo: ventaja mínima exigida sobre la casa ───────────────────────
-    // 5% garantiza que no sugerimos ruido estadístico (0.9%, 1.8% etc.).
-    // Un edge real sostenible empieza a ser significativo desde ~4-5%.
+    // 5% garantiza que no sugerimos ruido estadístico.
     private static final double EDGE_MINIMO = 0.05;
 
+    // ── Edge mínimo para RESULTADO (1X2, Doble Oportunidad) ─────────────────────
+    // Los bookmakers son muy eficientes en estos mercados: para un favorito claro
+    // (@1.40) el implied del bookmaker ya es 71.4%, muy cercano al 72% del motor.
+    // Exigir edge positivo descartaría casi todos los picks de resultado.
+    // Se permite hasta -5% de edge negativo: el motor puede estar hasta 5 puntos
+    // por debajo del bookmaker y aun así sugerimos el pick si la probabilidad es alta.
+    // Esto incluye "Doble Oportunidad 1X" donde @1.15 → implied 87% > motor 82%.
+    private static final double EDGE_MINIMO_RESULTADO = -0.05;
+
     // ── Edge mínimo para CORNERS ──────────────────────────────────────────────────
-    // El mercado de corners es menos eficiente que goles (menos apostadores,
-    // menos información pública disponible). Con 2% ya hay ventaja estadística
-    // real porque el mercado no está tan "ajustado" como el 1X2 o el Over/Under.
-    private static final double EDGE_MINIMO_CORNERS = 0.02;
+    // Mercado menos eficiente. Subido a 4% para reducir el número de picks de
+    // corners que entran al pool — evita que "Menos de 11.5 Corners" domine.
+    private static final double EDGE_MINIMO_CORNERS = 0.04;
 
     // ── Edge mínimo extra para tarjetas ─────────────────────────────────────────
-    // El modelo de tarjetas tiene más incertidumbre que goles/corners porque
-    // el contexto del partido (derby, presión, árbitro) no está en los datos.
+    // Mayor incertidumbre (árbitro, contexto del partido no capturado en datos).
     // Se exige 8% para que solo aparezca cuando la ventaja es muy clara.
     private static final double EDGE_MINIMO_TARJETAS = 0.08;
 
-    // ── Probabilidad mínima aceptable para cualquier pata ────────────────────
-    private static final double PROB_MINIMA_SELECCION = 0.50;
+    // ── Probabilidad mínima general ────────────────────────────────────────────
+    // 60%: un pick por debajo de este umbral es casi aleatorio.
+    private static final double PROB_MINIMA_SELECCION = 0.60;
+
+    // ── Probabilidad mínima para RESULTADO (1X2, Doble Oportunidad) ─────────────
+    // 55%: más bajo que el general para incluir victorias en partidos competitivos
+    // donde ningún equipo supera 60% de probabilidad. Un pick al 55-59% de victoria
+    // sigue siendo el resultado más probable del partido y merece mostrarse.
+    private static final double PROB_MINIMA_RESULTADO = 0.55;
+
+    // ── Probabilidad mínima por categoría (solo sugerencias automáticas) ────────
+    // Tarjetas y Corners son más difíciles de predecir: se exige mayor confianza.
+    // - TARJETAS 65%: el modelo usa fallback cuando faltan datos → exigir más margen.
+    // - CORNERS  62%: menos volumen de datos que goles pero más confiable que tarjetas.
+    private static final double PROB_MINIMA_TARJETAS = 0.65;
+    private static final double PROB_MINIMA_CORNERS  = 0.62;
 
     // ── Límites del pool ─────────────────────────────────────────────────────
     // El pool se construye por (partido × categoría): cada partido puede aportar
@@ -85,6 +113,10 @@ public class SugerenciaServicio {
     // Luego se limita el total de picks por categoría para evitar que una
     // categoría domine cuando hay muchos partidos disponibles.
     private static final int MAX_POR_CATEGORIA_EN_POOL     = 8;   // máx picks de la misma cat. en el pool general
+    private static final int MAX_POR_CATEGORIA_CORNERS     = 3;   // cap específico para CORNERS (evita dominio)
+    private static final int MAX_POR_MERCADO_EN_POOL       = 2;   // máx veces que el MISMO mercado aparece en el pool
+    // Ejemplo: "Menos de 11.5 Corners" puede entrar a lo sumo 2 veces (2 partidos distintos),
+    // aunque haya 8 partidos válidos con ese mercado. Garantiza variedad real.
     private static final int MAX_POR_PARTIDO_EQUIPO_FILTRO = 5;   // simples personalizados por equipo
     private static final int MAX_SUGERENCIAS_TIPO          = 10;
 
@@ -119,15 +151,22 @@ public class SugerenciaServicio {
                 analisisRecientes.size(),
                 analisisRecientes.stream().map(a -> a.getPartido().getId()).distinct().count());
 
-        // Filtrar por categoría apostable y probabilidad mínima
+        // Filtrar por categoría apostable y probabilidad mínima.
+        // RESULTADO usa umbral más bajo (55%) para incluir victorias en partidos
+        // competitivos donde ningún equipo supera 60% de probabilidad.
         List<Analisis> aptos = analisisRecientes.stream()
                 .filter(a -> CATEGORIAS_APOSTABLES.contains(a.getCategoriaMercado()))
-                .filter(a -> a.getProbabilidad() != null
-                        && a.getProbabilidad().doubleValue() >= PROB_MINIMA_SELECCION)
+                .filter(a -> a.getProbabilidad() != null)
+                .filter(a -> {
+                    double prob = a.getProbabilidad().doubleValue();
+                    if (a.getCategoriaMercado() == CategoriaAnalisis.RESULTADO)
+                        return prob >= PROB_MINIMA_RESULTADO;
+                    return prob >= PROB_MINIMA_SELECCION;
+                })
                 .toList();
 
-        log.info(">>> [SUGERENCIAS] Aptos (cat apostable + prob ≥ {}%): {}",
-                (int)(PROB_MINIMA_SELECCION * 100), aptos.size());
+        log.info(">>> [SUGERENCIAS] Aptos (cat apostable + prob ≥ {}%/{}% RESULTADO): {}",
+                (int)(PROB_MINIMA_SELECCION * 100), (int)(PROB_MINIMA_RESULTADO * 100), aptos.size());
 
         if (aptos.isEmpty()) return List.of();
 
@@ -162,10 +201,14 @@ public class SugerenciaServicio {
         todas.addAll(dobles);
         todas.addAll(triples);
 
-        // Ordenar por edgePromedio desc, luego confianzaPromedio como desempate
+        // Ordenar por score combinado: 60% probabilidad + 40% edge.
+        // Antes era edge primero → picks de 57% con 8% edge ganaban a picks de 80% con 3% edge.
+        // Ahora la probabilidad tiene más peso: un pick más probable siempre puntúa mejor
+        // salvo que el edge sea muy superior.
         todas.sort(Comparator
-                .comparingDouble(SugerenciaDTO::getEdgePromedio).reversed()
-                .thenComparingDouble(SugerenciaDTO::getConfianzaPromedio).reversed());
+                .comparingDouble((SugerenciaDTO s) ->
+                        s.getConfianzaPromedio() * 0.60 + Math.max(0.0, s.getEdgePromedio()) * 0.40)
+                .reversed());
 
         return armarRespuesta(todas);
     }
@@ -328,29 +371,46 @@ public class SugerenciaServicio {
             // Sin cuota real no hay edge calculable ni referencia fiable de precio.
             if (!Boolean.TRUE.equals(linea.getCuotaReal())) continue;
 
-            // Filtro de edge configurable por categoría:
-            //
-            // - Personalizar sugerencias (edgeMinimo=0.0): el usuario ve todo y decide.
-            // - Sugerencias automáticas: umbral diferenciado por mercado:
-            //     · TARJETAS:   8% — modelo con mayor incertidumbre contextual
-            //     · CORNERS:    2% — mercado menos eficiente, edge real desde 2%
-            //     · Resto:      5% — umbral estándar (goles, resultado, hándicap)
-            double edgeMinimoAplicable;
+            // En modo automático aplica umbrales diferenciados por categoría:
+            //   TARJETAS  → edge ≥ 8%  Y  prob ≥ 65%  (datos frecuentemente incompletos)
+            //   CORNERS   → edge ≥ 2%  Y  prob ≥ 62%
+            //   RESULTADO → edge ≥ 2%  (favoritos claros tienen edge bajo por diseño del mercado)
+            //   Resto     → edge ≥ 5%
+            // En modo personalizado (edgeMinimo=0.0) no se aplica ningún umbral.
             if (edgeMinimo > 0.0) {
+                double edgeMinimoAplicable;
+                double probMinimaCategoria;
+
                 if (a.getCategoriaMercado() == CategoriaAnalisis.TARJETAS) {
-                    edgeMinimoAplicable = EDGE_MINIMO_TARJETAS;
+                    edgeMinimoAplicable  = EDGE_MINIMO_TARJETAS;
+                    probMinimaCategoria  = PROB_MINIMA_TARJETAS;
                 } else if (a.getCategoriaMercado() == CategoriaAnalisis.CORNERS) {
-                    edgeMinimoAplicable = EDGE_MINIMO_CORNERS;
+                    edgeMinimoAplicable  = EDGE_MINIMO_CORNERS;
+                    probMinimaCategoria  = PROB_MINIMA_CORNERS;
+                } else if (a.getCategoriaMercado() == CategoriaAnalisis.RESULTADO) {
+                    // Edge negativo permitido: en 1X2/Doble Oportunidad el bookmaker es muy
+                    // eficiente y el motor casi nunca lo supera. Si exigiéramos edge ≥ 0,
+                    // nunca aparecerían victorias de favoritos. Con -5% el motor puede estar
+                    // hasta 5 puntos por debajo del bookmaker y aun así el pick se muestra.
+                    edgeMinimoAplicable  = EDGE_MINIMO_RESULTADO;   // -0.05
+                    probMinimaCategoria  = PROB_MINIMA_RESULTADO;   // 0.55
                 } else {
-                    edgeMinimoAplicable = edgeMinimo;
+                    edgeMinimoAplicable  = edgeMinimo;
+                    probMinimaCategoria  = PROB_MINIMA_SELECCION;
                 }
-            } else {
-                edgeMinimoAplicable = edgeMinimo;
+
+                if (a.getProbabilidad().doubleValue() < probMinimaCategoria) continue;
+                if (linea.getEdge() < edgeMinimoAplicable) continue;
             }
-            if (linea.getEdge() < edgeMinimoAplicable) continue;
 
             // Cuota mínima por pata real
             if (linea.getCuota() < CUOTA_MIN_PATA_REAL) continue;
+
+            // Cuota mínima específica para RESULTADO: se exige @1.30 mínimo.
+            // Picks de resultado a @1.10–1.29 no justifican el riesgo residual
+            // (un empate inesperado los echa a perder pagando muy poco si ganan).
+            if (a.getCategoriaMercado() == CategoriaAnalisis.RESULTADO
+                    && linea.getCuota() < CUOTA_MIN_PATA_RESULTADO) continue;
 
             // Clave: (partido, categoría) — conservar el mejor de cada par
             String clave = a.getPartido().getId() + "_" + a.getCategoriaMercado().name();
@@ -363,19 +423,49 @@ public class SugerenciaServicio {
                 .sorted(Comparator.comparingDouble(this::calcularScore).reversed())
                 .collect(Collectors.toList());
 
-        // ── Paso 3: aplicar límite por categoría ─────────────────────────────────
-        // Para simples del equipo filtrado, el límite es más generoso.
-        int maxCat = esPartidoFiltrado ? MAX_POR_PARTIDO_EQUIPO_FILTRO * 2 : MAX_POR_CATEGORIA_EN_POOL;
+        // ── Paso 3: aplicar límite por categoría Y por mercado específico ──────────
+        //
+        // Dos contadores independientes:
+        //
+        //   contadorPorCategoria → cada categoría (CORNERS, GOLES, RESULTADO…) puede
+        //     aportar hasta MAX_POR_CATEGORIA_EN_POOL picks al pool general.
+        //     Excepción: CORNERS tiene su propio límite MAX_POR_CATEGORIA_CORNERS = 3,
+        //     lo que evita que los corners monopolicen el pool cuando hay muchos partidos
+        //     con ese mercado válido.
+        //
+        //   contadorPorMercado → el MISMO nombre de mercado (ej: "Menos de 11.5 Corners")
+        //     puede aparecer como máximo MAX_POR_MERCADO_EN_POOL = 2 veces en todo el pool,
+        //     aunque haya 8 partidos distintos con ese mercado con edge suficiente.
+        //     Esto garantiza que el pool tenga variedad real de mercados, no solo el
+        //     mismo mercado repetido en partidos distintos.
+        //
+        // En modo personalizado (esPartidoFiltrado = true) no se aplica el cap de mercado
+        // para que el usuario vea todos los picks de su equipo.
 
         Map<String, Integer> contadorPorCategoria = new HashMap<>();
+        Map<String, Integer> contadorPorMercado   = new HashMap<>();
         List<SugerenciaLineaDTO> pool = new ArrayList<>();
 
         for (SugerenciaLineaDTO linea : ordenados) {
-            int cnt = contadorPorCategoria.getOrDefault(linea.getCategoria(), 0);
-            if (cnt < maxCat) {
-                pool.add(linea);
-                contadorPorCategoria.put(linea.getCategoria(), cnt + 1);
+            String cat = linea.getCategoria();
+            String mer = linea.getMercado();
+
+            // Límite de categoría (CORNERS tiene cap propio más bajo)
+            int maxCatAplicable = esPartidoFiltrado
+                    ? MAX_POR_PARTIDO_EQUIPO_FILTRO * 2
+                    : ("CORNERS".equals(cat) ? MAX_POR_CATEGORIA_CORNERS : MAX_POR_CATEGORIA_EN_POOL);
+            int cntCat = contadorPorCategoria.getOrDefault(cat, 0);
+            if (cntCat >= maxCatAplicable) continue;
+
+            // Límite de mercado específico — no aplica en modo personalizado
+            if (!esPartidoFiltrado) {
+                int cntMer = contadorPorMercado.getOrDefault(mer, 0);
+                if (cntMer >= MAX_POR_MERCADO_EN_POOL) continue;
+                contadorPorMercado.put(mer, cntMer + 1);
             }
+
+            pool.add(linea);
+            contadorPorCategoria.put(cat, cntCat + 1);
         }
 
         // ── Log de distribución ───────────────────────────────────────────────────
@@ -397,15 +487,17 @@ public class SugerenciaServicio {
     }
 
     /**
-     * Score de una pata = prob × (1 + max(0, edge) × 2)
+     * Score de una pata = prob × (1 + max(0, edge) × 1.5)
      *
-     * El factor ×2 amplifica el edge real frente a la probabilidad bruta.
-     * Sin cuota real, edge = 0 → score = prob. Con cuota real y edge positivo,
-     * el mercado sube en el ranking aunque su probabilidad sea menor.
+     * Antes el multiplicador era ×2, lo que hacía que un 57% con 8% edge superara
+     * a un 80% con 2% edge. Con ×1.5 la probabilidad pesa más:
+     *   - 80% + 2% edge → 0.80 × 1.03 = 0.824
+     *   - 57% + 8% edge → 0.57 × 1.12 = 0.638
+     * Un pick más probable siempre gana si la diferencia de probabilidad es grande.
      */
     private double calcularScore(SugerenciaLineaDTO linea) {
         double edge = linea.getEdge() != null ? linea.getEdge() : 0.0;
-        return linea.getProbabilidad() * (1.0 + Math.max(0.0, edge) * 2.0);
+        return linea.getProbabilidad() * (1.0 + Math.max(0.0, edge) * 1.5);
     }
 
     /**
@@ -752,42 +844,65 @@ public class SugerenciaServicio {
     // ─────────────────────────────────────────────────────────────────────────
 
     // Máximo de sugerencias a devolver en el resumen del día.
-    // 6 picks de alta confianza > 15 picks de calidad mixta.
-    private static final int MAX_SUGERENCIAS_DIA = 6;
+    // 9 permite mostrar diversidad real: simples + dobles + triples de distintas categorías.
+    private static final int MAX_SUGERENCIAS_DIA = 9;
 
     /**
-     * Devuelve las mejores sugerencias del día ordenadas por edge real.
+     * Arma la respuesta final agrupando por tipo y garantizando diversidad.
      *
-     * Estructura de la respuesta:
-     *   - Posición 0: la apuesta "del día" (mayor edge) — marcada con ⭐
-     *   - Posiciones 1-N: resto de sugerencias (top por edge, mezclando simples/dobles/triples)
+     * Estructura de salida:
+     *   - SIMPLES: máximo 1 por categoría (RESULTADO + GOLES + CORNERS/TARJETAS).
+     *     Sin este control, los corners dominan los simples porque tienen edge
+     *     positivo que la fórmula de score premia, mientras que RESULTADO tiene
+     *     edge negativo (clampeado a 0) y pierde la comparación aunque tenga
+     *     mayor probabilidad.
      *
-     * Límite: MAX_SUGERENCIAS_DIA (15). Con un pool grande hay muchas combinaciones
-     * válidas; mostrar las 15 mejores da al usuario opciones reales para elegir
-     * sin abrumarlo con cientos de resultados.
+     *   - DOBLES / TRIPLES: top 3 de cada tipo. Ya tienen diversidad incorporada
+     *     por la lógica de categorías distintas en combinar().
      *
-     * Por qué 15 en vez de 4:
-     *   Con MAX_SUGERENCIAS_TIPO=10 por tipo y 3 tipos = hasta 30 candidatos.
-     *   Antes se devolvía solo 1 por tipo (4 total), lo que descartaba el 85%
-     *   de las sugerencias válidas generadas. Con 15 el usuario ve diversidad real.
+     * El ⭐ va al primer simple (el más probable de alta confianza por categoría).
      */
     private List<SugerenciaDTO> armarRespuesta(List<SugerenciaDTO> todas) {
         if (todas.isEmpty()) return List.of();
 
-        List<SugerenciaDTO> respuesta = new ArrayList<>(todas);
+        // Separar por tipo (ya vienen ordenadas por score desc)
+        List<SugerenciaDTO> simples  = todas.stream()
+                .filter(s -> "Simple".equals(s.getTipo()))
+                .collect(Collectors.toList());
+        List<SugerenciaDTO> dobles   = todas.stream()
+                .filter(s -> "Doble".equals(s.getTipo()))
+                .collect(Collectors.toList());
+        List<SugerenciaDTO> triples  = todas.stream()
+                .filter(s -> "Triple".equals(s.getTipo()))
+                .collect(Collectors.toList());
 
-        // Marcar la mejor apuesta del día
-        SugerenciaDTO delDia = respuesta.get(0);
-        delDia.setDescripcion("⭐ " + delDia.getDescripcion());
-
-        // Ya vienen ordenadas por edge desc desde generarSugerenciasDelDia()
-        // Solo aplicamos el límite máximo
-        if (respuesta.size() > MAX_SUGERENCIAS_DIA) {
-            respuesta = respuesta.subList(0, MAX_SUGERENCIAS_DIA);
+        // SIMPLES: máximo 1 por categoría — primer pick de cada categoría ordenado por score
+        // Así el usuario ve la mejor victoria + el mejor over/under goles + el mejor corners,
+        // en lugar de 3 corners distintos todos con edge positivo.
+        List<SugerenciaDTO> simplesFinales = new ArrayList<>();
+        Set<String> categoriasYaEnSimples  = new HashSet<>();
+        for (SugerenciaDTO s : simples) {
+            if (s.getSelecciones() == null || s.getSelecciones().isEmpty()) continue;
+            String cat = s.getSelecciones().get(0).getCategoria();
+            if (categoriasYaEnSimples.add(cat)) {   // add() retorna true si era nuevo
+                simplesFinales.add(s);
+                if (simplesFinales.size() >= 3) break;
+            }
         }
 
-        log.info(">>> [SUGERENCIAS] Respuesta final: {} sugerencias (de {} candidatas generadas)",
-                respuesta.size(), todas.size());
+        List<SugerenciaDTO> respuesta = new ArrayList<>();
+        respuesta.addAll(simplesFinales);
+        respuesta.addAll(dobles.stream().limit(3).collect(Collectors.toList()));
+        respuesta.addAll(triples.stream().limit(3).collect(Collectors.toList()));
+
+        // Marcar la primera sugerencia como la apuesta del día
+        if (!respuesta.isEmpty()) {
+            respuesta.get(0).setDescripcion("⭐ " + respuesta.get(0).getDescripcion());
+        }
+
+        log.info(">>> [SUGERENCIAS] Respuesta: {} simples + {} dobles + {} triples = {} total (de {} candidatas)",
+                simplesFinales.size(), Math.min(dobles.size(), 3),
+                Math.min(triples.size(), 3), respuesta.size(), todas.size());
 
         return respuesta;
     }

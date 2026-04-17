@@ -53,6 +53,14 @@ public class ApiFootballMapper {
             }
         }
 
+        // Goles — solo disponibles cuando el partido ya terminó (FT/AET/PEN).
+        // Estos valores se persisten en Partido para que la resolución de picks
+        // no necesite volver a consultar la API.
+        if (dto.getGoals() != null) {
+            partido.setGolesLocal(dto.getGoals().getHome());
+            partido.setGolesVisitante(dto.getGoals().getAway());
+        }
+
         return partido;
     }
 

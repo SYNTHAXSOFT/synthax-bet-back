@@ -265,8 +265,12 @@ public class MotorAnalisis {
             //   2. promedioGolesFavorReciente → forma reciente / decay temporal
             // Al agregar aquí una condición nueva, todos los registros sin ese campo
             // se re-fetchan automáticamente en el próximo análisis.
-            boolean camposCompletos = existente.getPromedioGolesFavorCasa() != null
-                    && existente.getPromedioGolesFavorReciente() != null;
+            // Solo verificar el campo original de split casa/visita.
+            // NO incluir promedioGolesFavorReciente aquí: es un campo nuevo y si lo
+            // añadimos como condición, todos los registros existentes en BD (que tienen
+            // el campo en NULL) disparararían un re-fetch masivo. El campo reciente se
+            // llenará naturalmente en el próximo fetch genuino de cada equipo.
+            boolean camposCompletos = existente.getPromedioGolesFavorCasa() != null;
             if (camposCompletos) {
                 statsCacheHits.incrementAndGet();
                 log.info(">>> [STATS HIT] equipo {} temporada {} (BD, 0 requests)", idEquipo, temporada);

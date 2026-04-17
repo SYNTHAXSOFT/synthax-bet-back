@@ -79,6 +79,11 @@ public class NormalizadorMercado {
             Map.entry("BTTS No", "Both Teams Score - No"),
 
             // ── Corners Over/Under (nombres con Over/Under) ───────────────────────
+            // Rango 5.5–13.5: cubre partidos muy defensivos (λ≈6) hasta muy atacantes (λ≈14).
+            Map.entry("Over 5.5 Corners",   "Asian Corners - Over 5.5"),
+            Map.entry("Under 5.5 Corners",  "Asian Corners - Under 5.5"),
+            Map.entry("Over 6.5 Corners",   "Asian Corners - Over 6.5"),
+            Map.entry("Under 6.5 Corners",  "Asian Corners - Under 6.5"),
             Map.entry("Over 7.5 Corners",   "Asian Corners - Over 7.5"),
             Map.entry("Under 7.5 Corners",  "Asian Corners - Under 7.5"),
             Map.entry("Over 8.5 Corners",   "Asian Corners - Over 8.5"),
@@ -89,18 +94,30 @@ public class NormalizadorMercado {
             Map.entry("Under 10.5 Corners", "Asian Corners - Under 10.5"),
             Map.entry("Over 11.5 Corners",  "Asian Corners - Over 11.5"),
             Map.entry("Under 11.5 Corners", "Asian Corners - Under 11.5"),
+            Map.entry("Over 12.5 Corners",  "Asian Corners - Over 12.5"),
+            Map.entry("Under 12.5 Corners", "Asian Corners - Under 12.5"),
+            Map.entry("Over 13.5 Corners",  "Asian Corners - Over 13.5"),
+            Map.entry("Under 13.5 Corners", "Asian Corners - Under 13.5"),
 
             // ── Corners Over/Under (nombres en español) ───────────────────────────
-            Map.entry("Más de 7.5 Corners",   "Asian Corners - Over 7.5"),
+            Map.entry("Más de 5.5 Corners",    "Asian Corners - Over 5.5"),
+            Map.entry("Menos de 5.5 Corners",  "Asian Corners - Under 5.5"),
+            Map.entry("Más de 6.5 Corners",    "Asian Corners - Over 6.5"),
+            Map.entry("Menos de 6.5 Corners",  "Asian Corners - Under 6.5"),
+            Map.entry("Más de 7.5 Corners",    "Asian Corners - Over 7.5"),
             Map.entry("Menos de 7.5 Corners",  "Asian Corners - Under 7.5"),
-            Map.entry("Más de 8.5 Corners",   "Asian Corners - Over 8.5"),
+            Map.entry("Más de 8.5 Corners",    "Asian Corners - Over 8.5"),
             Map.entry("Menos de 8.5 Corners",  "Asian Corners - Under 8.5"),
-            Map.entry("Más de 9.5 Corners",   "Asian Corners - Over 9.5"),
+            Map.entry("Más de 9.5 Corners",    "Asian Corners - Over 9.5"),
             Map.entry("Menos de 9.5 Corners",  "Asian Corners - Under 9.5"),
-            Map.entry("Más de 10.5 Corners",  "Asian Corners - Over 10.5"),
+            Map.entry("Más de 10.5 Corners",   "Asian Corners - Over 10.5"),
             Map.entry("Menos de 10.5 Corners", "Asian Corners - Under 10.5"),
-            Map.entry("Más de 11.5 Corners",  "Asian Corners - Over 11.5"),
+            Map.entry("Más de 11.5 Corners",   "Asian Corners - Over 11.5"),
             Map.entry("Menos de 11.5 Corners", "Asian Corners - Under 11.5"),
+            Map.entry("Más de 12.5 Corners",   "Asian Corners - Over 12.5"),
+            Map.entry("Menos de 12.5 Corners", "Asian Corners - Under 12.5"),
+            Map.entry("Más de 13.5 Corners",   "Asian Corners - Over 13.5"),
+            Map.entry("Menos de 13.5 Corners", "Asian Corners - Under 13.5"),
 
             // ── Tarjetas Over/Under (nombres con Over/Under) ──────────────────────
             Map.entry("Over 1.5 Tarjetas",  "Cards Over/Under - Over 1.5"),

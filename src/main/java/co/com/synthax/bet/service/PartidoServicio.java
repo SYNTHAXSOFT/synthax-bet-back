@@ -7,7 +7,6 @@ import co.com.synthax.bet.proveedor.modelo.PartidoExterno;
 import co.com.synthax.bet.repository.AnalisisRepositorio;
 import co.com.synthax.bet.repository.CuotaRepositorio;
 import co.com.synthax.bet.repository.PartidoRepositorio;
-import co.com.synthax.bet.repository.PickRepositorio;
 import lombok.RequiredArgsConstructor;
 import lombok.extern.slf4j.Slf4j;
 import org.springframework.stereotype.Service;
@@ -25,7 +24,6 @@ public class PartidoServicio {
     private final PartidoRepositorio  partidoRepositorio;
     private final CuotaRepositorio    cuotaRepositorio;
     private final AnalisisRepositorio analisisRepositorio;
-    private final PickRepositorio     pickRepositorio;
     private final ProveedorFutbol     proveedorFutbol;
 
     /**
@@ -59,38 +57,34 @@ public class PartidoServicio {
     /**
      * Fuerza sincronización con la API y persiste los partidos en BD.
      *
-     * Antes de insertar datos frescos, elimina todos los partidos en una
-     * ventana de ±30 horas alrededor de la fecha pedida. Esto resuelve el
-     * problema de registros con timezone incorrecto (partidos de ayer
-     * guardados con hora UTC aparecían como partidos de hoy).
+     * Estrategia: UPSERT real (find-by-idPartidoApi + update), NO delete+insert.
+     * Esto preserva los IDs de Partido en BD, por lo que los Picks y Cuotas
+     * que referencian esos partidos siguen siendo válidos tras la re-sync.
      *
-     * Ejemplo: sincronizar 2026-04-07
-     *   → elimina partidos con fechaPartido BETWEEN 2026-04-06T18:00 AND 2026-04-08T06:00
-     *   → inserta datos frescos desde API con timezone=America/Bogota
-     *   → solo quedan partidos reales del día en hora Colombia
+     * Las cuotas y análisis sí se eliminan antes de re-sincronizar porque son
+     * datos regenerables — los Picks en cambio son datos del usuario y NUNCA
+     * deben borrarse automáticamente.
+     *
+     * Fix timezone: al hacer upsert, la fechaPartido se actualiza con el valor
+     * correcto (timezone=America/Bogota), corrigiendo cualquier registro previo
+     * guardado con timezone incorrecto.
      */
     public List<Partido> sincronizarPartidos(LocalDate fecha) {
 
-        // Limpiar registros en ventana ±6h para eliminar cualquier dato
-        // con timezone incorrecto que haya quedado de sincronizaciones anteriores.
-        // Orden obligatorio: cuotas → análisis → partidos (llaves foráneas).
         LocalDateTime desde = fecha.atTime(0, 0).minusHours(6);   // ayer 18:00
         LocalDateTime hasta = fecha.atTime(23, 59).plusHours(6);   // mañana 06:00
 
-        List<Partido> aEliminar = partidoRepositorio.findByFechaPartidoBetween(desde, hasta);
-        if (!aEliminar.isEmpty()) {
-            List<Long> ids = aEliminar.stream().map(Partido::getId).toList();
+        List<Partido> existentes = partidoRepositorio.findByFechaPartidoBetween(desde, hasta);
+        if (!existentes.isEmpty()) {
+            List<Long> ids = existentes.stream().map(Partido::getId).toList();
 
-            // 1. Eliminar picks que referencian esos partidos
-            pickRepositorio.deleteByPartidoIdIn(ids);
-            // 2. Eliminar cuotas que referencian esos partidos
+            // Eliminar cuotas y análisis (regenerables). Los Picks NO se tocan
+            // porque son datos del usuario — sus referencias a Partido siguen
+            // siendo válidas tras el upsert (mismo ID de BD).
             cuotaRepositorio.deleteByPartidoIdIn(ids);
-            // 3. Eliminar análisis que referencian esos partidos
             analisisRepositorio.deleteByPartidoIdIn(ids);
-            // 4. Eliminar los partidos (ahora sin hijos que los bloqueen)
-            partidoRepositorio.deleteByFechaPartidoBetween(desde, hasta);
 
-            log.info(">>> {} partidos eliminados (+ sus cuotas y análisis) antes de re-sincronizar", aEliminar.size());
+            log.info(">>> Cuotas y análisis de {} partidos borrados antes de re-sincronizar (picks intactos)", existentes.size());
         }
 
         List<PartidoExterno> externos = proveedorFutbol.obtenerPartidosDelDia(fecha);
@@ -131,6 +125,12 @@ public class PartidoServicio {
         partido.setLogoLocal(externo.getLogoLocal());
         partido.setLogoVisitante(externo.getLogoVisitante());
         partido.setEstado(mapearEstado(externo.getEstado()));
+
+        // Persistir goles cuando el partido ya terminó. Esto permite que
+        // resolverPendientesAutomatico() resuelva picks desde BD sin consumir
+        // requests adicionales a la API.
+        if (externo.getGolesLocal() != null)     partido.setGolesLocal(externo.getGolesLocal());
+        if (externo.getGolesVisitante() != null) partido.setGolesVisitante(externo.getGolesVisitante());
 
         return partidoRepositorio.save(partido);
     }

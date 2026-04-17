@@ -1,6 +1,7 @@
 package co.com.synthax.bet.proveedor.adaptadores.apifootball.dto;
 
 import com.fasterxml.jackson.annotation.JsonIgnoreProperties;
+import com.fasterxml.jackson.annotation.JsonProperty;
 import lombok.Data;
 
 /**
@@ -34,7 +35,9 @@ public class ApiFootballFixtureDTO {
     @Data
     @JsonIgnoreProperties(ignoreUnknown = true)
     public static class StatusInfo {
+        @JsonProperty("short")
         private String shortStatus; // NS, 1H, HT, 2H, FT, PST, CANC
+        @JsonProperty("long")
         private String longStatus;
         private Integer elapsed;
     }

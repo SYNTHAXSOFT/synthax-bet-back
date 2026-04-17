@@ -34,6 +34,7 @@ public class PickServicio {
     private final PartidoRepositorio  partidoRepositorio;
     private final AnalisisRepositorio analisisRepositorio;
     private final ApiFootballAdaptador apiFootball;
+    private final TelegramServicio telegramServicio;
 
     /**
      * Crea un pick a partir de los datos de una línea de sugerencia.
@@ -43,6 +44,13 @@ public class PickServicio {
     public PickResponseDTO crearDesdeDTO(PublicarPickDTO dto) {
         Partido partido = partidoRepositorio.findById(dto.getPartidoId())
                 .orElseThrow(() -> new RuntimeException("Partido no encontrado: " + dto.getPartidoId()));
+
+        // Validar duplicado: mismo partido + mismo mercado ya registrado
+        if (pickRepositorio.existsByPartidoIdAndNombreMercado(dto.getPartidoId(), dto.getNombreMercado())) {
+            throw new RuntimeException(
+                    "Ya existe un pick registrado para este partido con el mercado '"
+                    + dto.getNombreMercado() + "'. No se permiten picks duplicados.");
+        }
 
         Pick pick = new Pick();
         pick.setPartido(partido);
@@ -72,7 +80,12 @@ public class PickServicio {
                 dto.getNombreMercado(), dto.getCanal());
 
         Pick guardado = pickRepositorio.save(pick);
-        return PickResponseDTO.desde(guardado);
+        PickResponseDTO respuesta = PickResponseDTO.desde(guardado);
+
+        // Notificar al canal de Telegram correspondiente
+        telegramServicio.notificarNuevoPick(respuesta);
+
+        return respuesta;
     }
 
     @Transactional(readOnly = true)
@@ -115,7 +128,12 @@ public class PickServicio {
         pick.setLiquidadoEn(java.time.LocalDateTime.now());
         log.info(">>> Pick {} liquidado como {}", id, resultado);
         Pick guardado = pickRepositorio.save(pick);
-        return PickResponseDTO.desde(guardado);
+        PickResponseDTO respuesta = PickResponseDTO.desde(guardado);
+
+        // Notificar resultado al canal de Telegram
+        telegramServicio.notificarResultado(respuesta);
+
+        return respuesta;
     }
 
     public void eliminarPick(Long id) {
@@ -123,6 +141,22 @@ public class PickServicio {
             throw new RuntimeException("Pick no encontrado con id: " + id);
         }
         pickRepositorio.deleteById(id);
+    }
+
+    /**
+     * Reactiva un pick (lo vuelve PENDIENTE) para que pueda ser
+     * re-evaluado automáticamente en la próxima resolución.
+     * Útil cuando un pick quedó como NULO por falta de datos de la API
+     * (corners, tarjetas) pero el partido ya finalizó correctamente.
+     */
+    @Transactional
+    public PickResponseDTO reactivarPick(Long id) {
+        Pick pick = pickRepositorio.findByIdConPartido(id)
+                .orElseThrow(() -> new RuntimeException("Pick no encontrado con id: " + id));
+        pick.setResultado(ResultadoPick.PENDIENTE);
+        pick.setLiquidadoEn(null);
+        log.info(">>> Pick {} reactivado a PENDIENTE para re-evaluación", id);
+        return PickResponseDTO.desde(pickRepositorio.save(pick));
     }
 
     /**
@@ -191,8 +225,11 @@ public class PickServicio {
      * - Si el partido está en BD como FINALIZADO y tiene goles, no gasta requests.
      * - Si el partido no está finalizado en BD, consulta la API.
      * - Corners y tarjetas se obtienen de la API sólo cuando son necesarios.
+     *
+     * SIN @Transactional deliberadamente: el método hace llamadas HTTP a la API
+     * y mantener una transacción abierta durante esas llamadas monopolizaría la
+     * conexión DB. Cada save() corre en su propia mini-transacción del repositorio.
      */
-    @Transactional
     public RendimientoResolucionDTO resolverPendientesAutomatico() {
         List<Pick> pendientesList = pickRepositorio.findPendientesConPartido();
         log.info(">>> [RESOLUCIÓN] {} picks pendientes encontrados", pendientesList.size());
@@ -201,34 +238,62 @@ public class PickServicio {
 
         for (Pick pick : pendientesList) {
             Partido partido = pick.getPartido();
-            if (partido == null) { pendientesAun++; continue; }
+            if (partido == null) {
+                log.warn(">>> [RESOLUCIÓN] Pick {} sin partido asociado — saltando", pick.getId());
+                pendientesAun++; continue;
+            }
+
+            log.info(">>> [RESOLUCIÓN] Evaluando pick {} | {} | partido: {} vs {} | idApi={}",
+                    pick.getId(), pick.getNombreMercado(),
+                    partido.getEquipoLocal(), partido.getEquipoVisitante(),
+                    partido.getIdPartidoApi());
 
             int golesLocal     = -1;
             int golesVisitante = -1;
             int corners        = -1;
             int tarjetas       = -1;
 
+            // Picks de corners o tarjetas necesitan datos que no están en BD → siempre API
+            boolean necesitaEstadisticasEspeciales = requiereEstadisticas(pick.getNombreMercado());
+
             // 1. Intentar resolver desde datos ya guardados en BD
-            if (partido.getEstado() == EstadoPartido.FINALIZADO
+            //    (solo para picks de goles/resultado donde los goles son suficientes)
+            if (!necesitaEstadisticasEspeciales
+                    && partido.getEstado() == EstadoPartido.FINALIZADO
                     && partido.getGolesLocal() != null
                     && partido.getGolesVisitante() != null) {
                 golesLocal     = partido.getGolesLocal();
                 golesVisitante = partido.getGolesVisitante();
-                log.debug(">>> Pick {} resuelto desde BD (sin API)", pick.getId());
+                log.info(">>> [RESOLUCIÓN] Pick {} — resultado en BD: {} {}-{} {}",
+                        pick.getId(),
+                        partido.getEquipoLocal(), golesLocal, golesVisitante,
+                        partido.getEquipoVisitante());
             } else {
-                // 2. Consultar API
-                if (partido.getIdPartidoApi() == null) { pendientesAun++; continue; }
+                // 2. Consultar API (obligatorio para corners/tarjetas o cuando no está en BD)
+                log.info(">>> [RESOLUCIÓN] Pick {} — consultando API (necesitaEspeciales={}, estado={})...",
+                        pick.getId(), necesitaEstadisticasEspeciales, partido.getEstado());
+
+                if (partido.getIdPartidoApi() == null) {
+                    log.warn(">>> [RESOLUCIÓN] Pick {} — idPartidoApi es null, no se puede consultar API", pick.getId());
+                    pendientesAun++; continue;
+                }
 
                 Optional<ResultadoFixtureDTO> resultadoOpt =
                         apiFootball.obtenerResultadoFixture(partido.getIdPartidoApi());
 
                 if (resultadoOpt.isEmpty()) {
+                    log.warn(">>> [RESOLUCIÓN] Pick {} — API no devolvió resultado para fixture {}",
+                            pick.getId(), partido.getIdPartidoApi());
                     pendientesAun++;
                     continue;
                 }
 
                 ResultadoFixtureDTO res = resultadoOpt.get();
-                if (!res.estaFinalizado()) { pendientesAun++; continue; }
+                if (!res.estaFinalizado()) {
+                    log.warn(">>> [RESOLUCIÓN] Pick {} — fixture {} aún no finalizado según API",
+                            pick.getId(), partido.getIdPartidoApi());
+                    pendientesAun++; continue;
+                }
 
                 golesLocal     = res.getGolesLocal();
                 golesVisitante = res.getGolesVisitante();
@@ -252,6 +317,9 @@ public class PickServicio {
             pick.setLiquidadoEn(java.time.LocalDateTime.now());
             pickRepositorio.save(pick);
 
+            // Notificar resultado automático al canal de Telegram
+            telegramServicio.notificarResultado(PickResponseDTO.desde(pick));
+
             resueltos++;
             switch (resultado) {
                 case GANADO  -> ganados++;
@@ -271,5 +339,16 @@ public class PickServicio {
                 resueltos, ganados, perdidos, nulos, pendientesAun,
                 estadisticas()
         );
+    }
+
+    /**
+     * Retorna true si el mercado necesita datos de corners o tarjetas
+     * que NO están almacenados en la entidad Partido (solo hay goles).
+     * Estos picks deben consultar siempre la API para resolverse correctamente.
+     */
+    private boolean requiereEstadisticas(String mercado) {
+        if (mercado == null) return false;
+        String m = mercado.toLowerCase();
+        return m.contains("corner") || m.contains("tarjeta");
     }
 }

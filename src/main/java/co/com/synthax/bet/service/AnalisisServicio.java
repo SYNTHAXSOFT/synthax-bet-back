@@ -11,6 +11,7 @@ import lombok.extern.slf4j.Slf4j;
 import org.springframework.stereotype.Service;
 
 import java.math.BigDecimal;
+import java.util.ArrayList;
 import java.util.List;
 
 @Slf4j
@@ -18,28 +19,34 @@ import java.util.List;
 @RequiredArgsConstructor
 public class AnalisisServicio {
 
-    private final AnalisisRepositorio analisisRepositorio;
-    private final MotorAnalisis       motorAnalisis;
-    private final PartidoServicio     partidoServicio;
+    private final AnalisisRepositorio    analisisRepositorio;
+    private final MotorAnalisis          motorAnalisis;
+    private final PartidoServicio        partidoServicio;
+    private final EstadoEjecucionServicio estadoEjecucion;
 
     /**
-     * Devuelve los análisis del día de hoy.
-     * Si no existen, ejecuta el motor sobre los partidos del día.
+     * Devuelve los análisis del día de hoy que ya existen en BD.
+     *
+     * IMPORTANTE: Este método es SOLO LECTURA. NO lanza el motor si la BD está vacía.
+     * Si no hay análisis, retorna lista vacía y el frontend abre el modal de selección
+     * de ligas para que el usuario elija explícitamente qué analizar.
+     *
+     * Esto evita el problema de que al entrar a "Análisis" por primera vez en el día
+     * se disparara automáticamente un análisis de TODOS los partidos globales (3+ horas).
+     * La ejecución siempre debe ser explícita vía POST /ejecutar con ligas seleccionadas.
      */
     public List<Analisis> obtenerAnalisisDeHoy() {
         List<Partido> partidos = partidoServicio.obtenerPartidosDeHoy();
 
         if (partidos.isEmpty()) {
-            log.warn(">>> Sin partidos hoy para analizar");
+            log.info(">>> Sin partidos hoy en BD — retornando lista vacía");
             return List.of();
         }
 
-        // Obtenemos los IDs de los partidos de hoy
         List<Long> idsPartidosHoy = partidos.stream()
                 .map(Partido::getId)
                 .toList();
 
-        // Buscamos análisis existentes solo para los partidos de hoy
         List<Analisis> existentes = analisisRepositorio.findByPartidoIdIn(idsPartidosHoy);
 
         if (!existentes.isEmpty()) {
@@ -47,8 +54,9 @@ public class AnalisisServicio {
             return existentes;
         }
 
-        log.info(">>> Ejecutando motor de análisis para {} partidos de hoy", partidos.size());
-        return motorAnalisis.analizarPartidos(partidos);
+        // BD vacía para hoy → el frontend detecta [] y abre el modal de ligas
+        log.info(">>> Sin análisis para hoy en BD — el frontend debe mostrar modal de selección de ligas");
+        return List.of();
     }
 
     /**
@@ -133,7 +141,30 @@ public class AnalisisServicio {
                 eliminados, ligaIds != null && !ligaIds.isEmpty() ? ligaIds.size() : "todas");
 
         log.info(">>> Re-ejecutando motor para {} partidos", partidos.size());
-        return motorAnalisis.analizarPartidos(partidos);
+
+        // ── Ejecución con progreso por partido ───────────────────────────────
+        // Se itera uno a uno en lugar de delegar a analizarPartidos() para poder
+        // actualizar el EstadoEjecucionServicio entre cada partido y así el
+        // frontend pueda hacer polling y mostrar la barra de progreso en tiempo real.
+        estadoEjecucion.iniciar("ANALISIS", partidos.size());
+        List<Analisis> todos = new ArrayList<>();
+        try {
+            for (int i = 0; i < partidos.size(); i++) {
+                Partido p = partidos.get(i);
+                estadoEjecucion.actualizarProgreso(i,
+                        String.format("%s vs %s (%d/%d)",
+                                p.getEquipoLocal(), p.getEquipoVisitante(), i + 1, partidos.size()));
+                try {
+                    todos.addAll(motorAnalisis.analizarPartido(p));
+                } catch (Exception e) {
+                    log.error(">>> Error analizando {} vs {}: {}",
+                            p.getEquipoLocal(), p.getEquipoVisitante(), e.getMessage());
+                }
+            }
+        } finally {
+            estadoEjecucion.completar();
+        }
+        return todos;
     }
 
     /**

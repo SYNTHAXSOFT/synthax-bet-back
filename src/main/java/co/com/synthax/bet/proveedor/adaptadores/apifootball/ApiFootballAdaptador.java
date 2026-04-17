@@ -585,8 +585,11 @@ public class ApiFootballAdaptador implements ProveedorFutbol, ProveedorCuotas {
 
         try {
             // 1. Marcador y estado
-            if (!gestorCache.puedeHacerRequest()) {
-                log.warn(">>> Límite de requests alcanzado al consultar resultado fixture {}", fixtureId);
+            // Usa puedeHacerRequestParaResolucion() (umbral = MARGEN_MINIMO=5) en lugar
+            // de puedeHacerRequest() (umbral = reservaCuotas=30). Así la resolución de
+            // picks funciona aunque el budget de análisis general esté agotado.
+            if (!gestorCache.puedeHacerRequestParaResolucion()) {
+                log.warn(">>> Sin cupo para consultar resultado fixture {} — picks quedarán PENDIENTE", fixtureId);
                 return Optional.empty();
             }
 
@@ -595,7 +598,7 @@ public class ApiFootballAdaptador implements ProveedorFutbol, ProveedorCuotas {
             ApiFootballRespuesta<Map<String, Object>> respRaw =
                     objectMapper.readValue(jsonFixture, new TypeReference<>() {});
             if (respRaw.getResponse() == null || respRaw.getResponse().isEmpty()) {
-                log.debug(">>> Fixture {} no encontrado en API", fixtureId);
+                log.warn(">>> [RESOLUCIÓN] Fixture {} no encontrado en API — response vacío", fixtureId);
                 return Optional.empty();
             }
 
@@ -622,7 +625,8 @@ public class ApiFootballAdaptador implements ProveedorFutbol, ProveedorCuotas {
             }
 
             if (!"FINALIZADO".equals(estadoNorm)) {
-                log.debug(">>> Fixture {} estado={} — no finalizado aún", fixtureId, statusShort);
+                log.warn(">>> [RESOLUCIÓN] Fixture {} estado API='{}' (norm='{}') — no es FT/AET/PEN",
+                        fixtureId, statusShort, estadoNorm);
                 return Optional.empty();
             }
 

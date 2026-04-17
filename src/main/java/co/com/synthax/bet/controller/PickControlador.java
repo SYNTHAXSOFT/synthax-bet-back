@@ -109,6 +109,24 @@ public class PickControlador {
     }
 
     /**
+     * PATCH /api/picks/{id}/reactivar
+     * Vuelve un pick al estado PENDIENTE para que sea re-evaluado
+     * automáticamente. Útil cuando quedó NULO por falta de datos de la API.
+     */
+    @PreAuthorize("hasAnyRole('ROOT', 'ADMINISTRADOR')")
+    @PatchMapping("/{id}/reactivar")
+    public ResponseEntity<?> reactivarPick(@PathVariable Long id) {
+        try {
+            PickResponseDTO pick = pickServicio.reactivarPick(id);
+            return ResponseEntity.ok(pick);
+        } catch (RuntimeException e) {
+            Map<String, String> error = new HashMap<>();
+            error.put("error", e.getMessage());
+            return ResponseEntity.status(HttpStatus.NOT_FOUND).body(error);
+        }
+    }
+
+    /**
      * POST /api/picks/resolver-pendientes
      * Evalúa automáticamente todos los picks pendientes consultando la API de resultados.
      * Se invoca al hacer clic en "Rendimiento" en el menú.

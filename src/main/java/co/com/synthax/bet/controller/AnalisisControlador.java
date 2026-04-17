@@ -3,6 +3,7 @@ package co.com.synthax.bet.controller;
 import co.com.synthax.bet.entity.Analisis;
 import co.com.synthax.bet.enums.CategoriaAnalisis;
 import co.com.synthax.bet.service.AnalisisServicio;
+import co.com.synthax.bet.service.EstadoEjecucionServicio;
 import lombok.RequiredArgsConstructor;
 import org.springframework.http.HttpStatus;
 import org.springframework.http.ResponseEntity;
@@ -19,7 +20,27 @@ import java.util.Map;
 @RequiredArgsConstructor
 public class AnalisisControlador {
 
-    private final AnalisisServicio analisisServicio;
+    private final AnalisisServicio        analisisServicio;
+    private final EstadoEjecucionServicio estadoEjecucion;
+
+    /**
+     * GET /api/analisis/progreso
+     * Devuelve el estado actual del motor de análisis o ingesta de cuotas.
+     * El frontend hace polling a este endpoint cada 2 segundos para mostrar
+     * la barra de progreso sin necesidad de WebSockets.
+     *
+     * Respuesta ejemplo (ejecutando):
+     *   { "ejecutando": true, "fase": "ANALISIS", "progreso": 12, "total": 35,
+     *     "porcentaje": 34, "detalle": "Real Madrid vs Barcelona (12/35)" }
+     *
+     * Respuesta cuando termina:
+     *   { "ejecutando": false, "fase": "IDLE", "progreso": 35, "total": 35,
+     *     "porcentaje": 100, "detalle": "Completado" }
+     */
+    @GetMapping("/progreso")
+    public ResponseEntity<?> obtenerProgreso() {
+        return ResponseEntity.ok(estadoEjecucion.obtenerEstado());
+    }
 
     /**
      * GET /api/analisis/hoy

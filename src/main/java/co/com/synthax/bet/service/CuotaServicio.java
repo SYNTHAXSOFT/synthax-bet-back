@@ -48,10 +48,11 @@ import java.util.stream.Collectors;
 @RequiredArgsConstructor
 public class CuotaServicio {
 
-    private final CuotaRepositorio    cuotaRepositorio;
-    private final PartidoRepositorio  partidoRepositorio;
-    private final AnalisisRepositorio analisisRepositorio;
-    private final GestorCache         gestorCache;
+    private final CuotaRepositorio        cuotaRepositorio;
+    private final PartidoRepositorio      partidoRepositorio;
+    private final AnalisisRepositorio     analisisRepositorio;
+    private final GestorCache             gestorCache;
+    private final EstadoEjecucionServicio estadoEjecucion;
 
     /**
      * Proveedor de cuotas — puede no estar disponible según la configuración.
@@ -201,7 +202,15 @@ public class CuotaServicio {
         List<Cuota>   todasAGuardar       = new ArrayList<>();
         List<String>  partidosSinCuotas    = new ArrayList<>();
 
+        estadoEjecucion.iniciar("CUOTAS", conApiId.size());
+        int cuotasIdx = 0;
+        try {
         for (Partido partido : conApiId) {
+            estadoEjecucion.actualizarProgreso(cuotasIdx,
+                    String.format("%s vs %s (%d/%d)",
+                            partido.getEquipoLocal(), partido.getEquipoVisitante(),
+                            cuotasIdx + 1, conApiId.size()));
+            cuotasIdx++;
             try {
                 List<CuotaExterna> externas =
                         proveedorCuotas.obtenerCuotasPorPartido(partido.getIdPartidoApi());
@@ -246,6 +255,9 @@ public class CuotaServicio {
                 log.error(">>> [CUOTAS] Error en partido {} vs {}: {}",
                         partido.getEquipoLocal(), partido.getEquipoVisitante(), e.getMessage());
             }
+        }
+        } finally {
+            estadoEjecucion.completar();
         }
 
         // ── Paso 4: un único saveAll() para todos los partidos ───────────────
