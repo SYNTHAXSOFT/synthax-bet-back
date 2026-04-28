@@ -3,54 +3,44 @@ package co.com.synthax.bet.dto;
 import lombok.Data;
 import lombok.NoArgsConstructor;
 
+import java.util.List;
+
 /**
  * Filtros enviados por el usuario desde la pantalla "Personalizar Sugerencias".
- * Todos los campos son opcionales — si viene null se usa el valor por defecto.
+ * Todos los campos son opcionales — si vienen null o vacíos se usan valores por defecto.
  */
 @Data
 @NoArgsConstructor
 public class FiltroSugerenciaDTO {
 
-    /**
-     * Probabilidad mínima de cada selección individual (0.0 - 1.0).
-     * Por defecto 0.50 (50 %).
-     */
+    /** Probabilidad mínima de cada selección individual (0.0 - 1.0). */
     private Double probMinima;
 
-    /**
-     * Probabilidad máxima de cada selección individual (0.0 - 1.0).
-     * Por defecto 1.0 (sin límite superior).
-     */
+    /** Probabilidad máxima de cada selección individual (0.0 - 1.0). */
     private Double probMaxima;
 
-    /**
-     * Cuota mínima de la combinada resultante.
-     * Por defecto 1.80.
-     */
+    /** Cuota mínima de la combinada resultante. */
     private Double cuotaMinimaTotal;
 
     /**
-     * Texto libre para filtrar por equipo.
-     * Si se indica, al menos una selección de la combinada debe pertenecer
-     * a un partido donde juegue ese equipo (búsqueda case-insensitive).
+     * Equipos a buscar (multi-selección).
+     * Si se indica 1 equipo → todas las patas son de ese partido.
+     * Si se indican 2+ equipos → cada equipo aporta patas a la combinada.
      */
-    private String equipoBuscado;
+    private List<String> equiposBuscados;
 
     /**
-     * Liga por la que filtrar (ej: "La Liga", "Premier League", "Champions League").
-     * Si se indica, TODAS las selecciones de la combinada deben pertenecer a esa liga.
-     * Búsqueda parcial case-insensitive.
+     * Ligas a filtrar (multi-selección).
+     * Solo aparecen partidos de alguna de estas ligas.
      */
-    private String ligaBuscada;
+    private List<String> ligasBuscadas;
 
-    /**
-     * Tipo de apuesta deseado: "Simple", "Doble", "Triple" o null = todos.
-     */
+    /** Tipo de apuesta deseado: "Simple", "Doble", "Triple" o null = todos. */
     private String tipoApuesta;
 
     /**
      * Categorías a incluir (GOLES, CORNERS, TARJETAS, RESULTADO, HANDICAP, MARCADOR_EXACTO).
      * Si viene vacío o null se incluyen todas las apostables.
      */
-    private java.util.List<String> categorias;
+    private List<String> categorias;
 }

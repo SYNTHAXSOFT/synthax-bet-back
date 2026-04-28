@@ -62,7 +62,7 @@ public class Pick {
 
     /** Categoría del mercado: GOLES, CORNERS, TARJETAS, etc. */
     @Enumerated(EnumType.STRING)
-    @Column(name = "categoria_mercado")
+    @Column(name = "categoria_mercado", columnDefinition = "varchar(31)")
     private CategoriaAnalisis categoriaMercado;
 
     // Blockchain (Diferencial #2)

@@ -15,8 +15,13 @@ import lombok.extern.slf4j.Slf4j;
  *  - "Over X.X Corners" / "Under X.X Corners"
  *  - "Over X.X Tarjetas" / "Under X.X Tarjetas"
  *  - "Clean Sheet Local" / "Clean Sheet Visitante"
+ *  - "No Clean Sheet Local" / "No Clean Sheet Visitante"
+ *  - "Win to Nil Local" / "Win to Nil Visitante"
+ *  - "Goles Local Over X.X" / "Goles Local Under X.X"
+ *  - "Goles Visitante Over X.X" / "Goles Visitante Under X.X"
  *  - "AH Local -X.X" / "AH Visitante +X.X"
  *  - "Marcador Exacto X-X"
+ *  - "Local Más/Menos de X.5 Corners" / "Visitante Más/Menos de X.5 Corners" → NULO (sin datos split)
  */
 @Slf4j
 public class EvaluadorPick {
@@ -28,6 +33,8 @@ public class EvaluadorPick {
      * @param golesLocal     goles del equipo local al finalizar el partido
      * @param golesVisitante goles del equipo visitante al finalizar el partido
      * @param corners        total de corners del partido (-1 si no disponible)
+     * @param cornersLocal   corners del equipo local (-1 si no disponible)
+     * @param cornersVisitante corners del equipo visitante (-1 si no disponible)
      * @param tarjetas       total de tarjetas amarillas del partido (-1 si no disponible)
      * @return GANADO, PERDIDO o NULO si no se puede determinar
      */
@@ -35,6 +42,8 @@ public class EvaluadorPick {
                                         int golesLocal,
                                         int golesVisitante,
                                         int corners,
+                                        int cornersLocal,
+                                        int cornersVisitante,
                                         int tarjetas) {
         if (nombreMercado == null || nombreMercado.isBlank()) return ResultadoPick.NULO;
 
@@ -77,6 +86,80 @@ public class EvaluadorPick {
         if (m.equals("Clean Sheet Visitante")) {
             return golesLocal == 0 ? ResultadoPick.GANADO : ResultadoPick.PERDIDO;
         }
+        if (m.equals("No Clean Sheet Local")) {
+            // El local NO mantiene portería a cero → el visitante marcó al menos 1 gol
+            return golesVisitante > 0 ? ResultadoPick.GANADO : ResultadoPick.PERDIDO;
+        }
+        if (m.equals("No Clean Sheet Visitante")) {
+            // El visitante NO mantiene portería a cero → el local marcó al menos 1 gol
+            return golesLocal > 0 ? ResultadoPick.GANADO : ResultadoPick.PERDIDO;
+        }
+
+        // ── Win to Nil ────────────────────────────────────────────────────────
+        if (m.equals("Win to Nil Local")) {
+            // Local gana Y no recibe goles
+            return (golesLocal > golesVisitante && golesVisitante == 0)
+                    ? ResultadoPick.GANADO : ResultadoPick.PERDIDO;
+        }
+        if (m.equals("Win to Nil Visitante")) {
+            // Visitante gana Y no recibe goles
+            return (golesVisitante > golesLocal && golesLocal == 0)
+                    ? ResultadoPick.GANADO : ResultadoPick.PERDIDO;
+        }
+
+        // ── Goles por equipo individual (Local / Visitante) Over / Under ──────
+        // Generados por CalculadoraMercadosAvanzados.calcularGolesEquipo()
+        // Ejemplo: "Goles Local Over 0.5", "Goles Visitante Under 1.5"
+        if (m.startsWith("Goles Local ") || m.startsWith("Goles Visitante ")) {
+            boolean esLocal = m.startsWith("Goles Local ");
+            String resto = m.substring(esLocal ? "Goles Local ".length() : "Goles Visitante ".length()).trim();
+            boolean esOver = resto.startsWith("Over ");
+            if (!esOver && !resto.startsWith("Under ")) return ResultadoPick.NULO;
+            String lineaStr = resto.substring(esOver ? 5 : 6).trim();
+            double linea;
+            try {
+                linea = Double.parseDouble(lineaStr);
+            } catch (NumberFormatException e) {
+                log.warn("EvaluadorPick: no se pudo parsear línea en '{}'", m);
+                return ResultadoPick.NULO;
+            }
+            int golesEquipo = esLocal ? golesLocal : golesVisitante;
+            boolean supera = golesEquipo > linea;
+            return (esOver == supera) ? ResultadoPick.GANADO : ResultadoPick.PERDIDO;
+        }
+
+        // ── Corners por equipo individual (Local / Visitante Más/Menos de X.5 Corners) ──
+        // Generados por CalculadoraCorners.calcularPorEquipo()
+        // Ejemplo: "Local Más de 4.5 Corners", "Visitante Menos de 3.5 Corners"
+        if ((m.startsWith("Local Más de ") || m.startsWith("Local Menos de ")
+                || m.startsWith("Visitante Más de ") || m.startsWith("Visitante Menos de "))
+                && m.endsWith("Corners")) {
+            boolean esLocal = m.startsWith("Local ");
+            int cornersEquipo = esLocal ? cornersLocal : cornersVisitante;
+            if (cornersEquipo < 0) {
+                log.warn("EvaluadorPick: '{}' — corners individuales no disponibles → NULO", m);
+                return ResultadoPick.NULO;
+            }
+            // Extrae "Más de X.5" o "Menos de X.5" del mercado
+            // Formato: "Local Más de 4.5 Corners" → prefijo = "Local " → resto = "Más de 4.5 Corners"
+            String prefijo = esLocal ? "Local " : "Visitante ";
+            String resto = m.substring(prefijo.length()).trim(); // "Más de 4.5 Corners"
+            boolean esOver = resto.startsWith("Más de ");
+            // Extrae el número: "Más de 4.5 Corners" → "4.5 Corners" → "4.5"
+            String sinPrefijo = esOver
+                    ? resto.substring("Más de ".length())
+                    : resto.substring("Menos de ".length());
+            String lineaStr = sinPrefijo.replace("Corners", "").trim();
+            double linea;
+            try {
+                linea = Double.parseDouble(lineaStr);
+            } catch (NumberFormatException e) {
+                log.warn("EvaluadorPick: no se pudo parsear línea en '{}'", m);
+                return ResultadoPick.NULO;
+            }
+            boolean supera = cornersEquipo > linea;
+            return (esOver == supera) ? ResultadoPick.GANADO : ResultadoPick.PERDIDO;
+        }
 
         // ── Over / Under (goles, corners, tarjetas) ───────────────────────────
         if (m.startsWith("Over ") || m.startsWith("Under ")) {
@@ -114,6 +197,7 @@ public class EvaluadorPick {
         if (m.startsWith("AH Local") || m.startsWith("AH Visitante")) {
             boolean esLocal = m.startsWith("AH Local");
             // extrae el número: "AH Local -1.0" → -1.0, "AH Visitante +1.5" → 1.5
+            // El signo + del visitante desaparece con replaceAll, pero el - del local se conserva.
             String numStr = m.replaceAll("[^0-9.\\-]", "").replace("--", "-");
             double handicap;
             try {
@@ -121,13 +205,19 @@ public class EvaluadorPick {
             } catch (NumberFormatException e) {
                 return ResultadoPick.NULO;
             }
-            // Para AH Local -H: goles_local + H > goles_visitante → GANADO
-            // Para AH Visitante +H: goles_visitante + H > goles_local → GANADO (H viene positivo)
-            double ajuste = esLocal ? handicap : -handicap;
-            double resultado = (golesLocal + ajuste) - golesVisitante;
+            // AH Local -H   → (golesLocal + H) - golesVisitante  > 0 → GANADO
+            //   Ej: "AH Local -1.0"  H=-1.0  → golesLocal - 1.0 > golesVisitante (gana por 2+)
+            // AH Visitante +H → (golesVisitante + H) - golesLocal > 0 → GANADO
+            //   Ej: "AH Visitante +1.5" H=1.5 → golesVisitante + 1.5 > golesLocal (pierde por ≤1 o gana)
+            double resultado;
+            if (esLocal) {
+                resultado = (golesLocal + handicap) - golesVisitante;
+            } else {
+                resultado = (golesVisitante + handicap) - golesLocal;
+            }
             if (resultado > 0) return ResultadoPick.GANADO;
             if (resultado < 0) return ResultadoPick.PERDIDO;
-            return ResultadoPick.NULO; // empate exacto con AH → devuelve apuesta
+            return ResultadoPick.NULO; // empate exacto con AH → push → devuelve apuesta
         }
 
         // ── Marcador Exacto ───────────────────────────────────────────────────

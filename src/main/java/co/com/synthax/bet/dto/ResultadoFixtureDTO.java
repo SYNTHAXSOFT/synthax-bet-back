@@ -22,6 +22,12 @@ public class ResultadoFixtureDTO {
     /** Total de corners en el partido. -1 si no disponible. */
     private int corners;
 
+    /** Corners del equipo local. -1 si no disponible. */
+    private int cornersLocal;
+
+    /** Corners del equipo visitante. -1 si no disponible. */
+    private int cornersVisitante;
+
     /** Total de tarjetas amarillas en el partido. -1 si no disponible. */
     private int tarjetas;
 

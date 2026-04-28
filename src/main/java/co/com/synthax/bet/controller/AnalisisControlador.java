@@ -1,27 +1,36 @@
 package co.com.synthax.bet.controller;
 
+import co.com.synthax.bet.dto.ResolucionDTO;
 import co.com.synthax.bet.entity.Analisis;
 import co.com.synthax.bet.enums.CategoriaAnalisis;
 import co.com.synthax.bet.service.AnalisisServicio;
+import co.com.synthax.bet.service.DiagnosticoExportServicio;
 import co.com.synthax.bet.service.EstadoEjecucionServicio;
+import co.com.synthax.bet.service.ResolucionServicio;
 import lombok.RequiredArgsConstructor;
+import org.springframework.http.HttpHeaders;
 import org.springframework.http.HttpStatus;
+import org.springframework.http.MediaType;
 import org.springframework.http.ResponseEntity;
 import org.springframework.security.access.prepost.PreAuthorize;
 import org.springframework.web.bind.annotation.*;
 
 import java.math.BigDecimal;
+import java.time.LocalDate;
 import java.util.HashMap;
 import java.util.List;
 import java.util.Map;
+import java.util.stream.Collectors;
 
 @RestController
 @RequestMapping("/api/analisis")
 @RequiredArgsConstructor
 public class AnalisisControlador {
 
-    private final AnalisisServicio        analisisServicio;
-    private final EstadoEjecucionServicio estadoEjecucion;
+    private final AnalisisServicio         analisisServicio;
+    private final EstadoEjecucionServicio  estadoEjecucion;
+    private final ResolucionServicio       resolucionServicio;
+    private final DiagnosticoExportServicio diagnosticoExportServicio;
 
     /**
      * GET /api/analisis/progreso
@@ -100,6 +109,68 @@ public class AnalisisControlador {
             error.put("error", e.getMessage());
             return ResponseEntity.status(HttpStatus.NOT_FOUND).body(error);
         }
+    }
+
+    /**
+     * GET /api/analisis/resolver
+     * Compara cada predicción del último batch de análisis con el resultado real del partido.
+     *
+     * Respuesta: lista de ResolucionDTO ordenada por partido → categoría.
+     *   · verificable=true  → tenemos goles reales y la categoría es evaluable (RESULTADO, GOLES…)
+     *   · acerto=true/false → la predicción fue correcta o no
+     *   · acerto=null       → push (AH en empate exacto tras handicap) o partido no finalizado
+     *   · verificable=false → categoría no evaluable (CORNERS, TARJETAS…)
+     */
+    @GetMapping("/resolver")
+    public ResponseEntity<List<ResolucionDTO>> resolverUltimoBatch() {
+        return ResponseEntity.ok(resolucionServicio.resolverUltimoBatch());
+    }
+
+    /**
+     * GET /api/analisis/resolver/historial?fecha=yyyy-MM-dd
+     * Devuelve el historial persistido para una fecha específica.
+     * Si la fecha no tiene datos retorna lista vacía.
+     */
+    @GetMapping("/resolver/historial")
+    public ResponseEntity<List<ResolucionDTO>> obtenerHistorial(
+            @RequestParam("fecha") String fecha) {
+        LocalDate localDate = LocalDate.parse(fecha);
+        return ResponseEntity.ok(resolucionServicio.obtenerHistorial(localDate));
+    }
+
+    /**
+     * GET /api/analisis/resolver/historial/fechas
+     * Devuelve todas las fechas que tienen datos persistidos, más reciente primero.
+     */
+    @GetMapping("/resolver/historial/fechas")
+    public ResponseEntity<List<String>> obtenerFechasHistorial() {
+        List<String> fechas = resolucionServicio.obtenerFechasHistorial()
+                .stream()
+                .map(LocalDate::toString)
+                .collect(Collectors.toList());
+        return ResponseEntity.ok(fechas);
+    }
+
+    /**
+     * GET /api/analisis/resolver/exportar
+     * Genera un CSV con todas las sugerencias del pool del día incluyendo:
+     *   - Resultado real del partido y si el motor acertó
+     *   - Lambdas calculadas (reproducción del motor Poisson)
+     *   - Estadísticas completas de ambos equipos (inputs al motor)
+     *   - Datos del árbitro designado
+     *
+     * El archivo sirve para analizar externamente por qué las sugerencias
+     * fallaron y proponer mejoras al algoritmo de selección.
+     */
+    @GetMapping("/resolver/exportar")
+    public ResponseEntity<byte[]> exportarDiagnostico() {
+        byte[] csv = diagnosticoExportServicio.generarCsv();
+        String filename = "diagnostico_" + LocalDate.now() + ".csv";
+        return ResponseEntity.ok()
+                .header(HttpHeaders.CONTENT_DISPOSITION,
+                        "attachment; filename=\"" + filename + "\"")
+                .contentType(MediaType.parseMediaType("text/csv; charset=UTF-8"))
+                .body(csv);
     }
 
     /**

@@ -134,6 +134,13 @@ public class MotorAnalisis {
                 partido, CategoriaAnalisis.CORNERS,
                 calculadoraCorners.calcular(statsLocal, statsVisitante)));
 
+        // Corners por equipo individual (Local / Visitante).
+        // Usa las mismas lambdas que los corners totales pero aplicadas por separado,
+        // permitiendo sugerir "Barcelona Más de 4.5 Corners" cuando su λ individual es alta.
+        porPersistir.addAll(construirMercados(
+                partido, CategoriaAnalisis.CORNERS_EQUIPO,
+                calculadoraCorners.calcularPorEquipo(statsLocal, statsVisitante)));
+
         porPersistir.addAll(construirMercados(
                 partido, CategoriaAnalisis.TARJETAS,
                 calculadoraTarjetas.calcular(statsLocal, statsVisitante, arbitro)));
@@ -162,14 +169,47 @@ public class MotorAnalisis {
                 calculadoraMercadosAvanzados.calcularHandicapAsiatico(statsLocal, statsVisitante, liga)));
 
         // ── Un único saveAll() por partido en lugar de N saves individuales ──
+        log.info(">>> [MOTOR] {} análisis a persistir para {} vs {} — categorías: {}",
+                porPersistir.size(), partido.getEquipoLocal(), partido.getEquipoVisitante(),
+                porPersistir.stream()
+                        .map(a -> a.getCategoriaMercado().name())
+                        .distinct()
+                        .sorted()
+                        .toList());
         try {
             List<Analisis> guardados = analisisRepositorio.saveAll(porPersistir);
             log.info(">>> {} análisis guardados en lote para {} vs {}",
                     guardados.size(), partido.getEquipoLocal(), partido.getEquipoVisitante());
             return guardados;
-        } catch (Exception e) {
-            log.error(">>> Error en saveAll para {} vs {}: {}",
-                    partido.getEquipoLocal(), partido.getEquipoVisitante(), e.getMessage());
+        } catch (Exception batchEx) {
+            // Incluir la causa raíz (batchEx.getCause()) para ver el error de BD real
+            Throwable causaBatch = batchEx.getCause() != null ? batchEx.getCause() : batchEx;
+            log.error(">>> [ERROR saveAll-batch] {} vs {} — {} [{}] — causa: {} [{}]",
+                    partido.getEquipoLocal(), partido.getEquipoVisitante(),
+                    batchEx.getMessage(), batchEx.getClass().getSimpleName(),
+                    causaBatch.getMessage(), causaBatch.getClass().getSimpleName());
+
+            // ── Fallback: intentar save individual para diagnosticar qué falla ──
+            // Si el batch falla (ej. un valor inválido en una categoría nueva),
+            // guardamos lo que sí funciona y logueamos qué mercado/categoría rompe.
+            // Esto también permite recuperar análisis parciales y revela el root cause.
+            List<Analisis> salvados = new ArrayList<>();
+            for (Analisis a : porPersistir) {
+                try {
+                    salvados.add(analisisRepositorio.save(a));
+                } catch (Exception ex) {
+                    Throwable causaInd = ex.getCause() != null ? ex.getCause() : ex;
+                    log.warn(">>> [ERROR save-individual] mercado='{}' categoria={} — {} — causa: {}",
+                            a.getNombreMercado(), a.getCategoriaMercado(),
+                            ex.getMessage(), causaInd.getMessage());
+                }
+            }
+            if (!salvados.isEmpty()) {
+                log.info(">>> [FALLBACK] {} de {} análisis salvados individualmente para {} vs {}",
+                        salvados.size(), porPersistir.size(),
+                        partido.getEquipoLocal(), partido.getEquipoVisitante());
+                return salvados;
+            }
             return List.of();
         }
     }
@@ -400,6 +440,23 @@ public class MotorAnalisis {
         if (ext.getPromedioCornersContra() != null)
             entity.setPromedioCornersContra(
                     BigDecimal.valueOf(ext.getPromedioCornersContra()).setScale(2, RoundingMode.HALF_UP));
+
+        // Corners — split casa / visita (para modelo Poisson contextual)
+        if (ext.getPromedioCornersFavorCasa() != null)
+            entity.setPromedioCornersFavorCasa(
+                    BigDecimal.valueOf(ext.getPromedioCornersFavorCasa()).setScale(2, RoundingMode.HALF_UP));
+
+        if (ext.getPromedioCornersFavorVisita() != null)
+            entity.setPromedioCornersFavorVisita(
+                    BigDecimal.valueOf(ext.getPromedioCornersFavorVisita()).setScale(2, RoundingMode.HALF_UP));
+
+        if (ext.getPromedioCornersContraCasa() != null)
+            entity.setPromedioCornersContraCasa(
+                    BigDecimal.valueOf(ext.getPromedioCornersContraCasa()).setScale(2, RoundingMode.HALF_UP));
+
+        if (ext.getPromedioCornersContraVisita() != null)
+            entity.setPromedioCornersContraVisita(
+                    BigDecimal.valueOf(ext.getPromedioCornersContraVisita()).setScale(2, RoundingMode.HALF_UP));
 
         if (ext.getPromedioTarjetasAmarillas() != null)
             entity.setPromedioTarjetas(

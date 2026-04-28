@@ -22,6 +22,7 @@ public class SugerenciaLineaDTO {
     private Long    idPartido;
     private String  partido;          // "Nacional vs América"
     private String  liga;
+    private String  horaPartido;      // "15:00" hora colombiana (America/Bogota) — null si no disponible
     private String  categoria;        // "GOLES", "RESULTADO", etc.
     private String  mercado;          // "Over 2.5", "Local gana"
     private Double  probabilidad;     // 0.78 = 78%

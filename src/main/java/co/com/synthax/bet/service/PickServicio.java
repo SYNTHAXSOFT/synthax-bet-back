@@ -248,10 +248,12 @@ public class PickServicio {
                     partido.getEquipoLocal(), partido.getEquipoVisitante(),
                     partido.getIdPartidoApi());
 
-            int golesLocal     = -1;
-            int golesVisitante = -1;
-            int corners        = -1;
-            int tarjetas       = -1;
+            int golesLocal          = -1;
+            int golesVisitante      = -1;
+            int corners             = -1;
+            int cornersLocal        = -1;
+            int cornersVisitante    = -1;
+            int tarjetas            = -1;
 
             // Picks de corners o tarjetas necesitan datos que no están en BD → siempre API
             boolean necesitaEstadisticasEspeciales = requiereEstadisticas(pick.getNombreMercado());
@@ -295,10 +297,12 @@ public class PickServicio {
                     pendientesAun++; continue;
                 }
 
-                golesLocal     = res.getGolesLocal();
-                golesVisitante = res.getGolesVisitante();
-                corners        = res.getCorners();
-                tarjetas       = res.getTarjetas();
+                golesLocal       = res.getGolesLocal();
+                golesVisitante   = res.getGolesVisitante();
+                corners          = res.getCorners();
+                cornersLocal     = res.getCornersLocal();
+                cornersVisitante = res.getCornersVisitante();
+                tarjetas         = res.getTarjetas();
 
                 // Actualizar partido en BD para no repetir consulta la próxima vez
                 partido.setEstado(EstadoPartido.FINALIZADO);
@@ -311,7 +315,8 @@ public class PickServicio {
 
             // 3. Evaluar el pick
             ResultadoPick resultado = EvaluadorPick.evaluar(
-                    pick.getNombreMercado(), golesLocal, golesVisitante, corners, tarjetas);
+                    pick.getNombreMercado(), golesLocal, golesVisitante,
+                    corners, cornersLocal, cornersVisitante, tarjetas);
 
             pick.setResultado(resultado);
             pick.setLiquidadoEn(java.time.LocalDateTime.now());

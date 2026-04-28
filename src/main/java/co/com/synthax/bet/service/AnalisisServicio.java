@@ -108,6 +108,18 @@ public class AnalisisServicio {
             partidos = todosHoy.stream()
                     .filter(p -> ligaIds.contains(p.getIdLigaApi()))
                     .collect(java.util.stream.Collectors.toList());
+
+            // ── Diagnóstico: cuántos matches hay por cada liga seleccionada ────
+            // Este log permite detectar inmediatamente si alguna liga tiene 0 matches
+            // en BD (posible mismatch de ID o rango de fechas incorrecto).
+            java.util.Map<String, Long> matchesPorLiga = ligaIds.stream()
+                    .collect(java.util.stream.Collectors.toMap(
+                            id -> id,
+                            id -> todosHoy.stream()
+                                    .filter(p -> id.equals(p.getIdLigaApi()))
+                                    .count()
+                    ));
+            log.info(">>> [FILTRO] Matches por liga seleccionada: {}", matchesPorLiga);
             log.info(">>> Análisis filtrado por {} ligas: {} partidos de {} totales hoy",
                     ligaIds.size(), partidos.size(), todosHoy.size());
         } else {
@@ -133,9 +145,14 @@ public class AnalisisServicio {
         // esos registros quedan en la BD y contaminarían las sugerencias mezclando
         // ligas no seleccionadas con las nuevas. Borrar todo el día garantiza que
         // la BD siempre refleja ÚNICAMENTE la última selección del admin.
-        java.time.LocalDateTime inicioDia = java.time.LocalDate.now().atStartOfDay();
-        java.time.LocalDateTime finDia    = java.time.LocalDate.now().atTime(23, 59, 59);
-        long eliminados = analisisRepositorio.findByCalculadoEnBetween(inicioDia, finDia).size();
+        //
+        // IMPORTANTE: se usa countBy (no findBy) para NO cargar las entidades en la
+        // caché L1 del EntityManager. Cargarlas antes del DELETE masivo dejaba
+        // "entidades fantasma" en caché que causaban que solo el primer partido se
+        // guardara correctamente y todos los saveAll() siguientes fallaran.
+        java.time.LocalDateTime inicioDia = java.time.LocalDate.now().atTime(0, 0).minusHours(6);
+        java.time.LocalDateTime finDia    = java.time.LocalDate.now().atTime(23, 59).plusHours(6);
+        long eliminados = analisisRepositorio.countByCalculadoEnBetween(inicioDia, finDia);
         analisisRepositorio.deleteByCalculadoEnBetween(inicioDia, finDia);
         log.info(">>> {} análisis del día eliminados — preparando nueva ejecución para {} ligas seleccionadas",
                 eliminados, ligaIds != null && !ligaIds.isEmpty() ? ligaIds.size() : "todas");
@@ -148,6 +165,8 @@ public class AnalisisServicio {
         // frontend pueda hacer polling y mostrar la barra de progreso en tiempo real.
         estadoEjecucion.iniciar("ANALISIS", partidos.size());
         List<Analisis> todos = new ArrayList<>();
+        int exitosos = 0;
+        int fallidos  = 0;
         try {
             for (int i = 0; i < partidos.size(); i++) {
                 Partido p = partidos.get(i);
@@ -155,15 +174,28 @@ public class AnalisisServicio {
                         String.format("%s vs %s (%d/%d)",
                                 p.getEquipoLocal(), p.getEquipoVisitante(), i + 1, partidos.size()));
                 try {
-                    todos.addAll(motorAnalisis.analizarPartido(p));
+                    List<Analisis> resultado = motorAnalisis.analizarPartido(p);
+                    todos.addAll(resultado);
+                    if (!resultado.isEmpty()) {
+                        exitosos++;
+                    } else {
+                        // analizarPartido devuelve List.of() cuando saveAll falla internamente
+                        fallidos++;
+                        log.warn(">>> [MOTOR] {} vs {} devolvió 0 análisis (saveAll falló — ver error arriba)",
+                                p.getEquipoLocal(), p.getEquipoVisitante());
+                    }
                 } catch (Exception e) {
-                    log.error(">>> Error analizando {} vs {}: {}",
-                            p.getEquipoLocal(), p.getEquipoVisitante(), e.getMessage());
+                    fallidos++;
+                    log.error(">>> Error analizando {} vs {}: {} [{}]",
+                            p.getEquipoLocal(), p.getEquipoVisitante(),
+                            e.getMessage(), e.getClass().getSimpleName(), e);
                 }
             }
         } finally {
             estadoEjecucion.completar();
         }
+        log.info(">>> [MOTOR] Resumen: {} partidos exitosos / {} fallidos de {} procesados — {} análisis generados",
+                exitosos, fallidos, partidos.size(), todos.size());
         return todos;
     }
 

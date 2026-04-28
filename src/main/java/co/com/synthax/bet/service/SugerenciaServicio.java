@@ -8,11 +8,13 @@ import co.com.synthax.bet.entity.Cuota;
 import co.com.synthax.bet.entity.Partido;
 import co.com.synthax.bet.enums.CategoriaAnalisis;
 import co.com.synthax.bet.repository.AnalisisRepositorio;
+import co.com.synthax.bet.repository.ArbitroRepositorio;
 import lombok.RequiredArgsConstructor;
 import lombok.extern.slf4j.Slf4j;
 import org.springframework.stereotype.Service;
 
 import java.time.LocalDateTime;
+import java.time.format.DateTimeFormatter;
 import java.util.*;
 import java.util.Collections;
 import java.util.stream.Collectors;
@@ -67,6 +69,18 @@ public class SugerenciaServicio {
     // Ejemplo que pasa: "1X2 - Local" @1.45, "Doble Oportunidad 1X" @1.35.
     private static final double CUOTA_MIN_PATA_RESULTADO = 1.30;
 
+    // ── Cuota mínima para "Menos de" corners ──────────────────────────────────
+    // Un "Under X.5 corners" con cuota @1.15–1.24 tiene tres problemas:
+    //   1. El edge calculado es ruido estadístico (~1–3%) con solo ~10 fixtures de datos.
+    //   2. Con λ conservador el modelo sobreestima la probabilidad del Under.
+    //   3. Ocupa el slot CORNERS_UNDER con patas de pago ínfimo, bloqueando el slot
+    //      CORNERS_OVER que podría mostrar picks más rentables y con mejor cuota.
+    // Exigir @1.25 garantiza que solo aparecen Unders donde el bookmaker tiene incertidumbre
+    // real, dejando espacio para picks "Más de" cuando el modelo los detecta.
+    // Ejemplo filtrado: "Under 12.5 @1.19" con 85% prob — pago mínimo, edge ruidoso.
+    // Ejemplo que pasa:  "Under 10.5 @1.38" con 78% prob y edge genuino → válido.
+    private static final double CUOTA_MIN_UNDER_CORNERS = 1.25;
+
     // ── Edge mínimo: ventaja mínima exigida sobre la casa ───────────────────────
     // 5% garantiza que no sugerimos ruido estadístico.
     private static final double EDGE_MINIMO = 0.05;
@@ -81,14 +95,38 @@ public class SugerenciaServicio {
     private static final double EDGE_MINIMO_RESULTADO = -0.05;
 
     // ── Edge mínimo para CORNERS ──────────────────────────────────────────────────
-    // Mercado menos eficiente. Subido a 4% para reducir el número de picks de
-    // corners que entran al pool — evita que "Menos de 11.5 Corners" domine.
-    private static final double EDGE_MINIMO_CORNERS = 0.04;
+    // Se exige edge ≥ 0 (break-even): el pick de corners debe valer al menos lo que
+    // el bookmaker ya tiene descontado en su cuota.
+    //
+    // Antes se permitía -5%, con el objetivo de no eliminar Overs donde el bookmaker
+    // es eficiente (umbrales 7.5–9.5). El diagnóstico del 2026-04-23 mostró que los
+    // picks de corners con edge negativo aportan ruido sin ganancia real:
+    //   • Athletic Club U10.5 Corners → ganó (edge -2.21%, pick pasó el umbral)
+    //   • Inter vs Como U10.5 Corners → falló con 84% prob (6 corners totales, λ=3.1)
+    //
+    // Con edge ≥ 0 los Overs legítimos siguen pasando cuando el motor calcula una
+    // probabilidad genuinamente superior a la implícita del bookmaker:
+    //   • Over 8.5 con λ=11 → P≈70%, cuota @1.50 → edge = +3.3%  ✓
+    //   • Over 8.5 con λ=9  → P≈60%, cuota @1.55 → edge = +3.5%  ✓
+    //   • Over 8.5 con λ=9  → P≈60%, cuota @1.80 → edge = -5.5%  ✗
+    //
+    // La diversidad Over/Under sigue garantizada por las claves separadas
+    // CORNERS_OVER / CORNERS_UNDER en el pool.
+    private static final double EDGE_MINIMO_CORNERS = 0.0;
 
     // ── Edge mínimo extra para tarjetas ─────────────────────────────────────────
     // Mayor incertidumbre (árbitro, contexto del partido no capturado en datos).
     // Se exige 8% para que solo aparezca cuando la ventaja es muy clara.
     private static final double EDGE_MINIMO_TARJETAS = 0.08;
+
+    // ── Mínimo de partidos del árbitro para incluir tarjetas en el pool ──────────
+    // Con menos de 10 partidos analizados, el promedio de tarjetas del árbitro
+    // tiene alta varianza y no es estadísticamente confiable. En ese caso el modelo
+    // cae al fallback de solo estadísticas de equipo, que es insuficiente para
+    // predecir tarjetas. Diagnóstico 2026-04-23: ambas sugerencias de tarjetas
+    // fallidas tenían árbitro sin datos → win rate 0%. Se excluyen del pool
+    // las tarjetas cuyo árbitro no alcance este umbral.
+    private static final int ARBITRO_PARTIDOS_MINIMOS_TARJETAS = 10;
 
     // ── Probabilidad mínima general ────────────────────────────────────────────
     // 60%: un pick por debajo de este umbral es casi aleatorio.
@@ -112,13 +150,30 @@ public class SugerenciaServicio {
     // un pick por cada categoría en la que tenga análisis válido.
     // Luego se limita el total de picks por categoría para evitar que una
     // categoría domine cuando hay muchos partidos disponibles.
-    private static final int MAX_POR_CATEGORIA_EN_POOL     = 8;   // máx picks de la misma cat. en el pool general
-    private static final int MAX_POR_CATEGORIA_CORNERS     = 3;   // cap específico para CORNERS (evita dominio)
-    private static final int MAX_POR_MERCADO_EN_POOL       = 2;   // máx veces que el MISMO mercado aparece en el pool
+    private static final int MAX_POR_CATEGORIA_EN_POOL        = 8;   // máx picks de la misma cat. en el pool general
+    private static final int MAX_POR_CATEGORIA_CORNERS        = 3;   // cap por dirección (OVER y UNDER cuentan por separado)
+    private static final int MAX_POR_CATEGORIA_CORNERS_EQUIPO = 2;   // cap por equipo × dirección (LOCAL_OVER, LOCAL_UNDER, etc.)
+    private static final int MAX_POR_MERCADO_EN_POOL          = 2;   // máx veces que el MISMO mercado aparece en el pool
     // Ejemplo: "Menos de 11.5 Corners" puede entrar a lo sumo 2 veces (2 partidos distintos),
-    // aunque haya 8 partidos válidos con ese mercado. Garantiza variedad real.
+    // aunque haya 8 partidos válidos con ese mercado. La deduplicación de output en
+    // armarRespuesta impide que aparezca repetido en múltiples sugerencias mostradas.
     private static final int MAX_POR_PARTIDO_EQUIPO_FILTRO = 5;   // simples personalizados por equipo
     private static final int MAX_SUGERENCIAS_TIPO          = 10;
+
+    // ── Probabilidad mínima de la combinada completa ──────────────────────────
+    // Un doble de 2 picks al 62% tiene probabilidad REAL de 0.62 × 0.62 = 38.4%:
+    // peor que lanzar una moneda. Sin este control, el sistema sugiere combinadas
+    // cuya probabilidad real de ganar es menor al 40%, lo cual no es "la apuesta
+    // más probable" sino todo lo contrario.
+    //
+    // Umbrales:
+    //   DOBLE  ≥ 42% → requiere ~2 picks promedio de 65%+ (0.65² = 42.3%)
+    //   TRIPLE ≥ 30% → requiere ~3 picks promedio de 67%+ (0.67³ = 30.1%)
+    //
+    // No aplicamos un umbral muy alto para no eliminar combinaciones válidas como
+    // un doble de [85% + 60%] = 51% (pasa) o un triple de [75% + 75% + 62%] = 34.9% (pasa).
+    private static final double PROB_MIN_COMBINADA_DOBLE  = 0.42;
+    private static final double PROB_MIN_COMBINADA_TRIPLE = 0.30;
 
     // ── Categorías apostables en casas de apuestas reales ───────────────────
     private static final Set<CategoriaAnalisis> CATEGORIAS_APOSTABLES = Set.of(
@@ -127,12 +182,14 @@ public class SugerenciaServicio {
             CategoriaAnalisis.HANDICAP,
             CategoriaAnalisis.MARCADOR_EXACTO,
             CategoriaAnalisis.CORNERS,
+            CategoriaAnalisis.CORNERS_EQUIPO,
             CategoriaAnalisis.TARJETAS
     );
 
     private final AnalisisRepositorio analisisRepositorio;
     private final CuotaServicio       cuotaServicio;
     private final NormalizadorMercado normalizadorMercado;
+    private final ArbitroRepositorio  arbitroRepositorio;
 
     // ─────────────────────────────────────────────────────────────────────────
     // Punto de entrada principal
@@ -201,13 +258,26 @@ public class SugerenciaServicio {
         todas.addAll(dobles);
         todas.addAll(triples);
 
-        // Ordenar por score combinado: 60% probabilidad + 40% edge.
-        // Antes era edge primero → picks de 57% con 8% edge ganaban a picks de 80% con 3% edge.
-        // Ahora la probabilidad tiene más peso: un pick más probable siempre puntúa mejor
-        // salvo que el edge sea muy superior.
+        // Ordenar por probabilidad REAL de ganar la apuesta completa (60%) + edge (40%).
+        //
+        // Se usa getProbabilidad() — la probabilidad COMBINADA real — en lugar de
+        // getConfianzaPromedio() — el promedio de las probabilidades individuales.
+        //
+        // El problema con el promedio: un triple [85% + 84% + 60%] muestra "76.4% confianza"
+        // pero la probabilidad real de que las 3 patas ganen es solo 42.9%.
+        // Ordenar por promedio inflaba artificialmente los triples y hacía que aparecieran
+        // como "la apuesta más probable" cuando en realidad son las menos probables.
+        //
+        // Con probabilidad combinada:
+        //   Simple  85%        → score 0.510 + edge_bonus → gana correctamente
+        //   Doble   51% (real) → score 0.306 + edge_bonus → por debajo del simple
+        //   Triple  43% (real) → score 0.258 + edge_bonus → correctamente el más bajo
+        //
+        // armarRespuesta ya separa por tipo (simples/dobles/triples) antes de seleccionar,
+        // así que el sort solo decide cuál es el MEJOR dentro de cada tipo.
         todas.sort(Comparator
                 .comparingDouble((SugerenciaDTO s) ->
-                        s.getConfianzaPromedio() * 0.60 + Math.max(0.0, s.getEdgePromedio()) * 0.40)
+                        s.getProbabilidadCombinada() * 0.60 + Math.max(0.0, s.getEdgePromedio()) * 0.40)
                 .reversed());
 
         return armarRespuesta(todas);
@@ -219,18 +289,31 @@ public class SugerenciaServicio {
 
     public List<SugerenciaDTO> generarPersonalizada(FiltroSugerenciaDTO filtro) {
 
-        double probMin = filtro.getProbMinima()    != null ? filtro.getProbMinima()  : PROB_MINIMA_SELECCION;
-        double probMax = filtro.getProbMaxima()    != null ? filtro.getProbMaxima()  : 1.0;
-        String equipo  = filtro.getEquipoBuscado() != null ? filtro.getEquipoBuscado().trim().toLowerCase() : "";
-        String liga    = filtro.getLigaBuscada()   != null ? filtro.getLigaBuscada().trim().toLowerCase()   : "";
-        String tipo    = filtro.getTipoApuesta();
+        // ── Parámetros del usuario (con defaults seguros) ─────────────────────────
+        final double probMin   = (filtro.getProbMinima()  != null) ? filtro.getProbMinima()  : 0.0;
+        final double probMax   = (filtro.getProbMaxima()  != null) ? filtro.getProbMaxima()  : 1.0;
+        final String tipo      = filtro.getTipoApuesta();
+        final Double cuotaFija = filtro.getCuotaMinimaTotal();
 
-        Double cuotaFija = filtro.getCuotaMinimaTotal();
+        // Listas de ligas y equipos — null-safe, sin blancos, minúsculas
+        final List<String> ligas = (filtro.getLigasBuscadas() == null) ? List.of()
+                : filtro.getLigasBuscadas().stream()
+                        .filter(s -> s != null && !s.isBlank())
+                        .map(s -> s.trim().toLowerCase())
+                        .collect(Collectors.toList());
 
+        final List<String> equipos = (filtro.getEquiposBuscados() == null) ? List.of()
+                : filtro.getEquiposBuscados().stream()
+                        .filter(s -> s != null && !s.isBlank())
+                        .map(s -> s.trim().toLowerCase())
+                        .collect(Collectors.toList());
+
+        // Categorías activas (null-safe en cada elemento)
         Set<CategoriaAnalisis> categoriasActivas = CATEGORIAS_APOSTABLES;
         if (filtro.getCategorias() != null && !filtro.getCategorias().isEmpty()) {
             Set<CategoriaAnalisis> solicitadas = filtro.getCategorias().stream()
-                    .map(String::toUpperCase)
+                    .filter(s -> s != null && !s.isBlank())
+                    .map(s -> s.trim().toUpperCase())
                     .filter(c -> { try { CategoriaAnalisis.valueOf(c); return true; }
                                   catch (IllegalArgumentException e) { return false; } })
                     .map(CategoriaAnalisis::valueOf)
@@ -238,84 +321,135 @@ public class SugerenciaServicio {
                     .collect(Collectors.toSet());
             if (!solicitadas.isEmpty()) categoriasActivas = solicitadas;
         }
+        final Set<CategoriaAnalisis> catsFinal = categoriasActivas;
 
+        // ── Cargar análisis (mismo método que sugerencias del día) ────────────────
         List<Analisis> analisisRecientes = obtenerAnalisisMasReciente();
-        if (analisisRecientes.isEmpty()) return List.of();
+        if (analisisRecientes.isEmpty()) {
+            log.warn(">>> [PERSONALIZADA] Sin análisis recientes en BD");
+            return List.of();
+        }
 
-        final Set<CategoriaAnalisis> catsFinal   = categoriasActivas;
-        final String                 ligaFinal   = liga;
-        final String                 equipoFinal = equipo;
-
-        // ── Filtrar análisis que cumplen probabilidad, categoría y liga ──────────
-        List<Analisis> base = analisisRecientes.stream()
-                .filter(a -> catsFinal.contains(a.getCategoriaMercado()))
+        // ── Filtro base de probabilidad ───────────────────────────────────────────
+        //
+        // Se aplican umbrales mínimos POR CATEGORÍA como piso de calidad:
+        //   RESULTADO ≥ 55% — umbral más bajo para incluir victorias de favoritos
+        //   Resto     ≥ 60% — umbral general (Goles, Corners, Tarjetas, Hándicap)
+        //
+        // Sobre ese piso, el rango del usuario (probMin / probMax) actúa como filtro
+        // adicional: probMin eleva el piso si es mayor que el mínimo por categoría,
+        // probMax descarta picks de muy alta probabilidad si el usuario lo desea.
+        //
+        // A diferencia de "sugerencias del día", el pool NO exige edge mínimo
+        // (edgeMinimo=0.0): la pantalla es de exploración y el usuario decide.
+        // El edge se muestra en la UI para que él evalúe el valor de cada pick.
+        //
+        // Nota de null-safety:
+        //   • categoriaMercado puede ser null → se verifica antes de llamar contains()
+        //     (Set.of() lanza NPE si se le pasa null)
+        //   • getPartido() es EAGER → nunca null, pero se guarda de todas formas
+        //   • getLiga() puede ser null → se comprueba antes de toLowerCase()
+        List<Analisis> aptos = analisisRecientes.stream()
+                .filter(a -> a.getCategoriaMercado() != null
+                          && catsFinal.contains(a.getCategoriaMercado()))
                 .filter(a -> a.getProbabilidad() != null)
+                .filter(a -> {
+                    double prob = a.getProbabilidad().doubleValue();
+                    // Umbral mínimo por categoría (idéntico a generarSugerenciasDelDia)
+                    double minimoCategoria = (a.getCategoriaMercado() == CategoriaAnalisis.RESULTADO)
+                            ? PROB_MINIMA_RESULTADO : PROB_MINIMA_SELECCION;
+                    return prob >= minimoCategoria;
+                })
+                // Rango adicional del usuario (probMin actúa como piso extra,
+                // probMax como techo — útil para explorar picks de rango medio)
                 .filter(a -> a.getProbabilidad().doubleValue() >= probMin)
                 .filter(a -> a.getProbabilidad().doubleValue() <= probMax)
-                .filter(a -> ligaFinal.isEmpty()
-                        || (a.getPartido().getLiga() != null
-                            && a.getPartido().getLiga().toLowerCase().contains(ligaFinal)))
-                .toList();
+                // Filtro de liga (solo si el usuario eligió ligas)
+                .filter(a -> {
+                    if (ligas.isEmpty()) return true;
+                    if (a.getPartido() == null) return false;
+                    String liga = a.getPartido().getLiga();
+                    if (liga == null || liga.isBlank()) return false;
+                    String ligaLower = liga.toLowerCase();
+                    return ligas.stream().anyMatch(l -> ligaLower.contains(l));
+                })
+                .collect(Collectors.toList());   // mutable list
 
-        if (base.isEmpty()) return List.of();
+        log.info(">>> [PERSONALIZADA] aptos tras filtros base+usuario: {}", aptos.size());
+        if (aptos.isEmpty()) return List.of();
 
-        // ── Separar partidos del equipo filtrado vs el resto ─────────────────────
+        // ── Filtro de equipo ──────────────────────────────────────────────────────
+        //
+        // Con 1 equipo → 1 partido → dobles/triples combinan mercados del mismo partido
+        // Con 2+ equipos → N partidos → combinaciones inter-partido (modo normal)
+        final boolean hayFiltroEquipo = !equipos.isEmpty();
         List<Analisis> aptosEquipo;
-        List<Analisis> aptosResto;
-        if (!equipoFinal.isEmpty()) {
-            aptosEquipo = base.stream()
-                    .filter(a -> (a.getPartido().getEquipoLocal()     + " " +
-                                  a.getPartido().getEquipoVisitante()).toLowerCase().contains(equipoFinal))
-                    .toList();
-            aptosResto  = base.stream()
-                    .filter(a -> !(a.getPartido().getEquipoLocal()    + " " +
-                                   a.getPartido().getEquipoVisitante()).toLowerCase().contains(equipoFinal))
-                    .toList();
+
+        if (hayFiltroEquipo) {
+            aptosEquipo = aptos.stream()
+                    .filter(a -> {
+                        if (a.getPartido() == null) return false;
+                        String local     = a.getPartido().getEquipoLocal()    != null
+                                           ? a.getPartido().getEquipoLocal()    : "";
+                        String visitante = a.getPartido().getEquipoVisitante() != null
+                                           ? a.getPartido().getEquipoVisitante() : "";
+                        String nombrePartido = (local + " " + visitante).toLowerCase();
+                        return equipos.stream().anyMatch(e -> nombrePartido.contains(e));
+                    })
+                    .collect(Collectors.toList());
         } else {
-            aptosEquipo = base;
-            aptosResto  = List.of();
+            aptosEquipo = aptos;
         }
 
+        log.info(">>> [PERSONALIZADA] aptosEquipo: {}", aptosEquipo.size());
         if (aptosEquipo.isEmpty()) return List.of();
 
-        // Precarga de cuotas para todos los partidos involucrados
-        List<Long> todosIds = java.util.stream.Stream
-                .concat(aptosEquipo.stream(), aptosResto.stream())
-                .map(a -> a.getPartido().getId()).distinct().collect(Collectors.toList());
-        Map<Long, List<Cuota>> cuotasMap = cuotaServicio.obtenerCuotasPorPartidos(todosIds);
+        // Partidos distintos → decide si se permiten patas del mismo partido
+        long partidosDistintos = aptosEquipo.stream()
+                .filter(a -> a.getPartido() != null)
+                .map(a -> a.getPartido().getId())
+                .distinct().count();
+        boolean permitirMismoPartido = hayFiltroEquipo && partidosDistintos == 1;
 
-        // ── Pool para simples: partidos del equipo filtrado (límite generoso) ────
-        // Edge mínimo = 0.0: en personalizar el usuario actúa como analista y
-        // quiere ver TODOS los mercados con cuota real, incluso edge negativo.
-        // El color del edge en la UI informa visualmente si es bueno o no.
-        List<SugerenciaLineaDTO> poolSimple = construirPool(aptosEquipo, cuotasMap,
-                !equipoFinal.isEmpty(), 0.0);
+        // ── Precarga de cuotas (batch — evita N+1) ────────────────────────────────
+        List<Long> idsPartidos = aptosEquipo.stream()
+                .filter(a -> a.getPartido() != null)
+                .map(a -> a.getPartido().getId())
+                .distinct()
+                .collect(Collectors.toList());
+        Map<Long, List<Cuota>> cuotasMap = cuotaServicio.obtenerCuotasPorPartidos(idsPartidos);
 
-        // ── Pool para dobles/triples: equipo + resto ──────────────────────────────
-        List<SugerenciaLineaDTO> poolCombinada;
-        if (!equipoFinal.isEmpty()) {
-            List<SugerenciaLineaDTO> poolResto = construirPool(aptosResto, cuotasMap, false, 0.0);
-            poolCombinada = new ArrayList<>(poolSimple);
-            poolCombinada.addAll(poolResto);
-        } else {
-            poolCombinada = poolSimple;
-        }
+        // ── Pool — sin umbral de edge (modo exploración) ──────────────────────────
+        // En personalizada el usuario filtra por sus preferencias y decide qué apostar.
+        // Se muestran todos los picks con cuota real, independientemente del edge,
+        // para que el usuario pueda explorar. El edge se muestra en la UI para que
+        // él evalúe el valor de cada pick.
+        List<SugerenciaLineaDTO> pool = construirPool(aptosEquipo, cuotasMap, hayFiltroEquipo, 0.0);
 
-        if (poolSimple.isEmpty() && poolCombinada.isEmpty()) return List.of();
+        log.info(">>> [PERSONALIZADA] pool: {} candidatos | hayFiltroEquipo={} | permitirMismoPartido={}",
+                pool.size(), hayFiltroEquipo, permitirMismoPartido);
+        if (pool.isEmpty()) return List.of();
 
+        // ── Generar combinaciones ─────────────────────────────────────────────────
         List<SugerenciaDTO> todas = new ArrayList<>();
-        if (tipo == null || tipo.isBlank() || tipo.equalsIgnoreCase("Simple"))
-            todas.addAll(generarCombinaciones(poolSimple, 1, CUOTA_MINIMA_SINGLE));
-        if (tipo == null || tipo.isBlank() || tipo.equalsIgnoreCase("Doble"))
-            todas.addAll(generarCombinaciones(poolCombinada, 2,
-                    cuotaFija != null ? cuotaFija : CUOTA_MINIMA_COMBINADA));
-        if (tipo == null || tipo.isBlank() || tipo.equalsIgnoreCase("Triple"))
-            todas.addAll(generarCombinaciones(poolCombinada, 3,
-                    cuotaFija != null ? cuotaFija : CUOTA_MINIMA_COMBINADA));
+        double cuotaCombi = (cuotaFija != null) ? cuotaFija : CUOTA_MINIMA_COMBINADA;
 
+        if (tipo == null || tipo.isBlank() || tipo.equalsIgnoreCase("Simple"))
+            todas.addAll(generarCombinaciones(pool, 1, CUOTA_MINIMA_SINGLE, false));
+        if (tipo == null || tipo.isBlank() || tipo.equalsIgnoreCase("Doble"))
+            todas.addAll(generarCombinaciones(pool, 2, cuotaCombi, permitirMismoPartido));
+        if (tipo == null || tipo.isBlank() || tipo.equalsIgnoreCase("Triple"))
+            todas.addAll(generarCombinaciones(pool, 3, cuotaCombi, permitirMismoPartido));
+
+        log.info(">>> [PERSONALIZADA] combinaciones generadas: {}", todas.size());
+
+        // Edge DESC primario, cuota DESC secundaria.
+        // Cada .reversed() se aplica a su propio comparador por separado;
+        // si se encadenara un .reversed() al final afectaría todo el comparador compuesto.
         todas.sort(Comparator
                 .comparingDouble(SugerenciaDTO::getEdgePromedio).reversed()
-                .thenComparingDouble(SugerenciaDTO::getCuotaCombinada).reversed());
+                .thenComparing(
+                        Comparator.comparingDouble(SugerenciaDTO::getCuotaCombinada).reversed()));
 
         return todas.stream().limit(20).collect(Collectors.toList());
     }
@@ -360,6 +494,39 @@ public class SugerenciaServicio {
                                                     boolean esPartidoFiltrado,
                                                     double edgeMinimo) {
 
+        // ── Paso 0: precarga de árbitros calificados para TARJETAS ───────────────
+        // Solo en modo automático (edgeMinimo > 0). En modo personalizado no se filtra
+        // porque el usuario ya decidió incluir la categoría.
+        //
+        // Se consultan en lote los árbitros únicos de todos los análisis de TARJETAS
+        // para evitar N+1 dentro del loop principal. El resultado se almacena en un
+        // mapa nombre_lower → calificado (boolean) para lookups O(1).
+        //
+        // Un árbitro está "calificado" si tiene ≥ ARBITRO_PARTIDOS_MINIMOS_TARJETAS
+        // partidos analizados en la BD, lo que garantiza que su promedio de tarjetas
+        // tiene suficiente respaldo estadístico.
+        Map<String, Boolean> arbitroCalificado = new HashMap<>();
+        if (edgeMinimo > 0.0) {
+            aptos.stream()
+                    .filter(a -> a.getCategoriaMercado() == CategoriaAnalisis.TARJETAS
+                            && a.getPartido() != null
+                            && a.getPartido().getArbitro() != null
+                            && !a.getPartido().getArbitro().isBlank())
+                    .map(a -> a.getPartido().getArbitro())
+                    .distinct()
+                    .forEach(nombre -> {
+                        var arbitroOpt = arbitroRepositorio.findByNombreIgnoreCase(nombre);
+                        int partidosArb = arbitroOpt
+                                .map(arb -> arb.getPartidosAnalizados() != null
+                                        ? arb.getPartidosAnalizados() : 0)
+                                .orElse(0);
+                        boolean calificado = partidosArb >= ARBITRO_PARTIDOS_MINIMOS_TARJETAS;
+                        arbitroCalificado.put(nombre.toLowerCase(), calificado);
+                        log.info(">>> [POOL-ARBITRO] '{}' → {} partidos → calificado={}",
+                                nombre, partidosArb, calificado);
+                    });
+        }
+
         // ── Paso 1: filtrar y construir DTOs ─────────────────────────────────────
         // Clave: partidoId_categoria → mejor pick (evita duplicados dentro del par)
         Map<String, SugerenciaLineaDTO> mejorPorPartidoCategoria = new HashMap<>();
@@ -384,7 +551,24 @@ public class SugerenciaServicio {
                 if (a.getCategoriaMercado() == CategoriaAnalisis.TARJETAS) {
                     edgeMinimoAplicable  = EDGE_MINIMO_TARJETAS;
                     probMinimaCategoria  = PROB_MINIMA_TARJETAS;
-                } else if (a.getCategoriaMercado() == CategoriaAnalisis.CORNERS) {
+
+                    // Mejora 1: excluir tarjetas cuyo árbitro no está calificado.
+                    // Sin datos del árbitro (o con pocos partidos), la predicción de
+                    // tarjetas cae al fallback de estadísticas de equipo, que es
+                    // insuficiente. El diagnóstico 2026-04-23 mostró 0% win rate en
+                    // tarjetas con árbitro sin datos en BD.
+                    String nombreArbitro = (a.getPartido() != null)
+                            ? a.getPartido().getArbitro() : null;
+                    if (nombreArbitro == null || nombreArbitro.isBlank()
+                            || !Boolean.TRUE.equals(arbitroCalificado.get(nombreArbitro.toLowerCase()))) {
+                        log.info(">>> [POOL] Tarjetas excluida — árbitro no calificado ('{}'): {} vs {}",
+                                nombreArbitro,
+                                a.getPartido() != null ? a.getPartido().getEquipoLocal()    : "?",
+                                a.getPartido() != null ? a.getPartido().getEquipoVisitante() : "?");
+                        continue;
+                    }
+                } else if (a.getCategoriaMercado() == CategoriaAnalisis.CORNERS
+                        || a.getCategoriaMercado() == CategoriaAnalisis.CORNERS_EQUIPO) {
                     edgeMinimoAplicable  = EDGE_MINIMO_CORNERS;
                     probMinimaCategoria  = PROB_MINIMA_CORNERS;
                 } else if (a.getCategoriaMercado() == CategoriaAnalisis.RESULTADO) {
@@ -412,8 +596,40 @@ public class SugerenciaServicio {
             if (a.getCategoriaMercado() == CategoriaAnalisis.RESULTADO
                     && linea.getCuota() < CUOTA_MIN_PATA_RESULTADO) continue;
 
-            // Clave: (partido, categoría) — conservar el mejor de cada par
-            String clave = a.getPartido().getId() + "_" + a.getCategoriaMercado().name();
+            // Cuota mínima específica para "Menos de" corners: se exige @1.25.
+            // Con el modelo actual (datos de 10 fixtures, λ ligeramente conservador),
+            // los Unders con cuota @1.15–1.24 tienen edge ~1–3% que es puro ruido.
+            // Filtrarlos obliga al slot CORNERS_UNDER a usar solo picks más rentables
+            // y libera el pool para que aparezcan picks "Más de" con mejor cuota.
+            // Este filtro NO aplica en modo personalizado (edgeMinimo=0.0).
+            if (edgeMinimo > 0.0
+                    && (a.getCategoriaMercado() == CategoriaAnalisis.CORNERS
+                        || a.getCategoriaMercado() == CategoriaAnalisis.CORNERS_EQUIPO)
+                    && !esOver(a.getNombreMercado())
+                    && linea.getCuota() < CUOTA_MIN_UNDER_CORNERS) continue;
+
+            // Clave: (partido, categoría) — conservar el mejor de cada par.
+            // Para CORNERS y GOLES se separa OVER vs UNDER: así el mejor Over y el
+            // mejor Under compiten por separado y ambos pueden entrar al pool.
+            // Sin esto, "Under 11.5 Corners" (85% prob) siempre elimina
+            // "Over 6.5 Corners" (62% prob) aunque este último tenga mejor edge.
+            String clave;
+            CategoriaAnalisis cat = a.getCategoriaMercado();
+            if (cat == CategoriaAnalisis.CORNERS || cat == CategoriaAnalisis.GOLES) {
+                boolean esOver = esOver(a.getNombreMercado());
+                clave = a.getPartido().getId() + "_" + cat.name() + "_" + (esOver ? "OVER" : "UNDER");
+            } else if (cat == CategoriaAnalisis.CORNERS_EQUIPO) {
+                // Para corners por equipo se separa por local/visitante Y over/under.
+                // Así se conserva el mejor "Local Más de X.5" y el mejor "Visitante Menos de X.5"
+                // de forma independiente para cada partido.
+                String nombre = a.getNombreMercado();
+                boolean esLocal = nombre != null && nombre.toLowerCase().startsWith("local");
+                boolean esOver  = esOver(nombre);
+                clave = a.getPartido().getId() + "_CORNERS_EQUIPO_"
+                        + (esLocal ? "LOCAL" : "VISITANTE") + "_" + (esOver ? "OVER" : "UNDER");
+            } else {
+                clave = a.getPartido().getId() + "_" + cat.name();
+            }
             mejorPorPartidoCategoria.merge(clave, linea, (viejo, nuevo) ->
                     calcularScore(nuevo) > calcularScore(viejo) ? nuevo : viejo);
         }
@@ -450,11 +666,27 @@ public class SugerenciaServicio {
             String cat = linea.getCategoria();
             String mer = linea.getMercado();
 
-            // Límite de categoría (CORNERS tiene cap propio más bajo)
+            // Para CORNERS y GOLES se usa una clave direccional (OVER/UNDER) en el contador
+            // para que cada dirección tenga su propio cupo independiente.
+            // Para CORNERS_EQUIPO se separa además por LOCAL/VISITANTE, de modo que
+            // "Local Más de 3.5" y "Visitante Más de 4.5" no compiten por el mismo slot.
+            String catKey = cat;
+            if ("CORNERS".equals(cat) || "GOLES".equals(cat)) {
+                boolean esOverLinea = esOver(mer);
+                catKey = cat + "_" + (esOverLinea ? "OVER" : "UNDER");
+            } else if ("CORNERS_EQUIPO".equals(cat)) {
+                boolean esLocal     = mer != null && mer.toLowerCase().startsWith("local");
+                boolean esOverLinea = esOver(mer);
+                catKey = "CORNERS_EQUIPO_" + (esLocal ? "LOCAL" : "VISITANTE") + "_" + (esOverLinea ? "OVER" : "UNDER");
+            }
+
+            // Límite de categoría independiente por dirección
             int maxCatAplicable = esPartidoFiltrado
                     ? MAX_POR_PARTIDO_EQUIPO_FILTRO * 2
-                    : ("CORNERS".equals(cat) ? MAX_POR_CATEGORIA_CORNERS : MAX_POR_CATEGORIA_EN_POOL);
-            int cntCat = contadorPorCategoria.getOrDefault(cat, 0);
+                    : ("CORNERS".equals(cat) ? MAX_POR_CATEGORIA_CORNERS
+                       : "CORNERS_EQUIPO".equals(cat) ? MAX_POR_CATEGORIA_CORNERS_EQUIPO
+                       : MAX_POR_CATEGORIA_EN_POOL);
+            int cntCat = contadorPorCategoria.getOrDefault(catKey, 0);
             if (cntCat >= maxCatAplicable) continue;
 
             // Límite de mercado específico — no aplica en modo personalizado
@@ -465,7 +697,7 @@ public class SugerenciaServicio {
             }
 
             pool.add(linea);
-            contadorPorCategoria.put(cat, cntCat + 1);
+            contadorPorCategoria.put(catKey, cntCat + 1);
         }
 
         // ── Log de distribución ───────────────────────────────────────────────────
@@ -487,6 +719,54 @@ public class SugerenciaServicio {
     }
 
     /**
+     * Determina si un nombre de mercado es dirección OVER (más de / over).
+     * Usado para separar CORNERS y GOLES en el pool y garantizar variedad.
+     */
+    private boolean esOver(String nombreMercado) {
+        if (nombreMercado == null) return false;
+        String lower = nombreMercado.toLowerCase();
+        return lower.contains("over")
+            || lower.contains("más de")
+            || lower.contains("mas de")
+            || lower.contains("more than");
+    }
+
+    /**
+     * Subcategoría efectiva para control de diversidad en simples y combinaciones.
+     *
+     * CORNERS y GOLES se separan en _OVER / _UNDER para que ambas direcciones
+     * puedan ocupar slots independientes en simples y combinarse en dobles/triples.
+     *
+     * Ejemplos:
+     *   "Más de 8.5 Corners"   → "CORNERS_OVER"
+     *   "Menos de 12.5 Corners"→ "CORNERS_UNDER"
+     *   "Más de 2.5"           → "GOLES_OVER"
+     *   "Menos de 2.5"         → "GOLES_UNDER"
+     *   "1X2 - Local"          → "RESULTADO"    (sin cambio)
+     *
+     * Efecto en simples: "Más de 8.5 Corners" y "Menos de 12.5 Corners" pueden
+     *   aparecer simultáneamente como dos simples distintos en lugar de competir
+     *   por el mismo slot CORNERS (donde "Menos de" siempre gana por mayor prob).
+     *
+     * Efecto en dobles/triples: "Más de 8.5 Corners (Partido A)" +
+     *   "Menos de 11.5 Corners (Partido B)" son categorías efectivas distintas
+     *   → válidos en la misma combinada. Misma dirección de distintos partidos
+     *   → misma categoría efectiva → siguen sin poder combinarse.
+     */
+    private String categoriaEfectiva(SugerenciaLineaDTO linea) {
+        String cat = linea.getCategoria();
+        if ("CORNERS".equals(cat) || "GOLES".equals(cat)) {
+            return cat + "_" + (esOver(linea.getMercado()) ? "OVER" : "UNDER");
+        }
+        if ("CORNERS_EQUIPO".equals(cat)) {
+            String mer  = linea.getMercado();
+            boolean esLocal = mer != null && mer.toLowerCase().startsWith("local");
+            return "CORNERS_EQUIPO_" + (esLocal ? "LOCAL" : "VISITANTE") + "_" + (esOver(mer) ? "OVER" : "UNDER");
+        }
+        return cat;
+    }
+
+    /**
      * Score de una pata = prob × (1 + max(0, edge) × 1.5)
      *
      * Antes el multiplicador era ×2, lo que hacía que un 57% con 8% edge superara
@@ -500,12 +780,23 @@ public class SugerenciaServicio {
         return linea.getProbabilidad() * (1.0 + Math.max(0.0, edge) * 1.5);
     }
 
+    private static final DateTimeFormatter HORA_COL = DateTimeFormatter.ofPattern("HH:mm");
+
     /**
      * Convierte un Analisis en SugerenciaLineaDTO con cuota real y edge calculados.
+     *
+     * horaPartido: la hora local del partido tal como queda en BD (America/Bogota),
+     * ya que la API se consulta con timezone=America/Bogota y el mapper descarta el
+     * offset ISO-8601 conservando la hora local directamente.
      */
     private SugerenciaLineaDTO toLineaDTO(Analisis a, Map<Long, List<Cuota>> cuotasMap) {
         Partido p    = a.getPartido();
         double  prob = a.getProbabilidad().doubleValue();
+
+        // Hora colombiana del partido — null-safe (algunos partidos sin hora definida)
+        String horaPartido = (p.getFechaPartido() != null)
+                ? p.getFechaPartido().format(HORA_COL)
+                : null;
 
         String nombreCasa = normalizadorMercado.aCasa(a.getNombreMercado());
 
@@ -617,6 +908,7 @@ public class SugerenciaServicio {
                 p.getId(),
                 p.getEquipoLocal() + " vs " + p.getEquipoVisitante(),
                 p.getLiga(),
+                horaPartido,
                 a.getCategoriaMercado().name(),
                 a.getNombreMercado(),
                 Math.round(prob * 10000.0) / 10000.0,
@@ -632,24 +924,38 @@ public class SugerenciaServicio {
 
     private List<SugerenciaDTO> generarCombinaciones(List<SugerenciaLineaDTO> pool,
                                                       int n, double cuotaMinima) {
+        return generarCombinaciones(pool, n, cuotaMinima, false);
+    }
+
+    /**
+     * @param permitirMismoPartido true cuando el filtro es de un único partido
+     *   (1 equipo buscado → 1 partido). Las patas pueden ser del mismo partido
+     *   pero de categorías distintas. Útil para ver todos los mercados de un partido.
+     */
+    private List<SugerenciaDTO> generarCombinaciones(List<SugerenciaLineaDTO> pool,
+                                                      int n, double cuotaMinima,
+                                                      boolean permitirMismoPartido) {
         // Intentar con diversidad de categoría (modo estricto)
         List<SugerenciaDTO> resultado = new ArrayList<>();
-        combinar(pool, n, 0, new ArrayList<>(), resultado, cuotaMinima, true);
+        combinar(pool, n, 0, new ArrayList<>(), resultado, cuotaMinima, true, permitirMismoPartido);
+        // Edge DESC primario, confianza DESC secundaria.
+        // Cada .reversed() se aplica a su propio comparador por separado;
+        // un .reversed() al final de thenComparingDouble() invertiría TODO el comparador compuesto.
         resultado.sort(Comparator
                 .comparingDouble(SugerenciaDTO::getEdgePromedio).reversed()
-                .thenComparingDouble(SugerenciaDTO::getConfianzaPromedio).reversed());
+                .thenComparing(
+                        Comparator.comparingDouble(SugerenciaDTO::getConfianzaPromedio).reversed()));
 
-        // Si no se generaron suficientes combinadas con diversidad de categoría,
-        // relajar al modo solo-partido (sin exigir categorías distintas).
-        // Esto puede ocurrir cuando el pool tiene pocas categorías disponibles.
+        // Si no se generaron suficientes, relajar diversidad de categoría
         if (resultado.size() < 3 && n >= 2) {
             log.info(">>> [COMBINAR] n={} con div. categoría: {} resultados — relajando restricción",
                     n, resultado.size());
             resultado.clear();
-            combinar(pool, n, 0, new ArrayList<>(), resultado, cuotaMinima, false);
+            combinar(pool, n, 0, new ArrayList<>(), resultado, cuotaMinima, false, permitirMismoPartido);
             resultado.sort(Comparator
                     .comparingDouble(SugerenciaDTO::getEdgePromedio).reversed()
-                    .thenComparingDouble(SugerenciaDTO::getConfianzaPromedio).reversed());
+                    .thenComparing(
+                            Comparator.comparingDouble(SugerenciaDTO::getConfianzaPromedio).reversed()));
         }
 
         return resultado.stream().limit(MAX_SUGERENCIAS_TIPO).collect(Collectors.toList());
@@ -666,7 +972,8 @@ public class SugerenciaServicio {
      */
     private void combinar(List<SugerenciaLineaDTO> pool, int n, int inicio,
                           List<SugerenciaLineaDTO> actual, List<SugerenciaDTO> resultado,
-                          double cuotaMinima, boolean diversidadCategoria) {
+                          double cuotaMinima, boolean diversidadCategoria,
+                          boolean permitirMismoPartido) {
         if (actual.size() == n) {
             double probCombinada  = actual.stream()
                     .mapToDouble(SugerenciaLineaDTO::getProbabilidad)
@@ -686,6 +993,14 @@ public class SugerenciaServicio {
             double edgePromedio = cuotaCombinada > 0
                     ? probCombinada - (1.0 / cuotaCombinada)
                     : 0.0;
+
+            // Filtro de probabilidad mínima de la combinada completa.
+            // Garantiza que la combinación tenga una probabilidad REAL de ganar razonable.
+            // Sin este filtro, un doble [62% + 62%] pasa (prob combinada = 38.4%, peor
+            // que una moneda). Con el filtro, se exige al menos 42% para dobles y 30%
+            // para triples.
+            if (n == 2 && probCombinada < PROB_MIN_COMBINADA_DOBLE)  return;
+            if (n >= 3 && probCombinada < PROB_MIN_COMBINADA_TRIPLE) return;
 
             // Filtro de cuota mínima inteligente:
             //   - Si la combinada tiene edge POSITIVO real → se acepta aunque la cuota
@@ -722,20 +1037,27 @@ public class SugerenciaServicio {
         for (int i = inicio; i < pool.size(); i++) {
             SugerenciaLineaDTO candidato = pool.get(i);
 
-            // Regla 1: nunca dos patas del mismo partido
-            boolean mismoPartido = actual.stream()
-                    .anyMatch(s -> s.getIdPartido().equals(candidato.getIdPartido()));
-            if (mismoPartido) continue;
+            // Regla 1: mismo partido — solo permitido si el filtro es de un único partido
+            // (en ese caso las patas son mercados distintos del mismo partido)
+            if (!permitirMismoPartido) {
+                boolean mismoPartido = actual.stream()
+                        .anyMatch(s -> s.getIdPartido().equals(candidato.getIdPartido()));
+                if (mismoPartido) continue;
+            }
 
-            // Regla 2 (opcional): nunca dos patas de la misma categoría
+            // Regla 2 (opcional): nunca dos patas de la misma categoría efectiva.
+            // CORNERS_OVER y CORNERS_UNDER son categorías distintas → pueden combinarse
+            // en el mismo doble/triple si son de partidos diferentes.
+            // Ejemplo válido:   "Más de 8.5 Corners (Partido A)" + "Menos de 11.5 Corners (Partido B)"
+            // Ejemplo inválido: "Más de 8.5 Corners (Partido A)" + "Más de 9.5 Corners (Partido B)"
             if (diversidadCategoria) {
                 boolean mismaCategoria = actual.stream()
-                        .anyMatch(s -> s.getCategoria().equals(candidato.getCategoria()));
+                        .anyMatch(s -> categoriaEfectiva(s).equals(categoriaEfectiva(candidato)));
                 if (mismaCategoria) continue;
             }
 
             actual.add(candidato);
-            combinar(pool, n, i + 1, actual, resultado, cuotaMinima, diversidadCategoria);
+            combinar(pool, n, i + 1, actual, resultado, cuotaMinima, diversidadCategoria, permitirMismoPartido);
             actual.remove(actual.size() - 1);
         }
     }
@@ -795,6 +1117,49 @@ public class SugerenciaServicio {
     }
 
     // ─────────────────────────────────────────────────────────────────────────
+    // Pool del día — expuesto para diagnóstico post-partido
+    // ─────────────────────────────────────────────────────────────────────────
+
+    /**
+     * Devuelve el pool de candidatos del último batch — las patas individuales
+     * que el motor consideró para construir las sugerencias del día.
+     *
+     * Aplica exactamente los mismos filtros de prob, edge y cuota que
+     * generarSugerenciasDelDia(), por lo que cada item del pool es una
+     * apuesta que el motor habría podido sugerir.
+     *
+     * Usado por ResolucionServicio para el diagnóstico post-partido:
+     * permite comparar lo que el motor habría sugerido contra el resultado real.
+     */
+    public List<SugerenciaLineaDTO> obtenerPoolDelDia() {
+        List<Analisis> analisisRecientes = obtenerAnalisisMasReciente();
+        if (analisisRecientes.isEmpty()) return List.of();
+
+        List<Analisis> aptos = analisisRecientes.stream()
+                .filter(a -> CATEGORIAS_APOSTABLES.contains(a.getCategoriaMercado()))
+                .filter(a -> a.getProbabilidad() != null)
+                .filter(a -> {
+                    double prob = a.getProbabilidad().doubleValue();
+                    if (a.getCategoriaMercado() == CategoriaAnalisis.RESULTADO)
+                        return prob >= PROB_MINIMA_RESULTADO;
+                    return prob >= PROB_MINIMA_SELECCION;
+                })
+                .collect(Collectors.toList());
+
+        if (aptos.isEmpty()) return List.of();
+
+        List<Long> idsPartidos = aptos.stream()
+                .map(a -> a.getPartido().getId())
+                .distinct()
+                .collect(Collectors.toList());
+        Map<Long, List<Cuota>> cuotasMap = cuotaServicio.obtenerCuotasPorPartidos(idsPartidos);
+
+        List<SugerenciaLineaDTO> pool = construirPool(aptos, cuotasMap, false);
+        log.info(">>> [POOL-DIA] {} candidatos con cuota real para diagnóstico", pool.size());
+        return pool;
+    }
+
+    // ─────────────────────────────────────────────────────────────────────────
     // Ligas y equipos disponibles
     // ─────────────────────────────────────────────────────────────────────────
 
@@ -820,6 +1185,13 @@ public class SugerenciaServicio {
     // Obtener análisis más reciente
     // ─────────────────────────────────────────────────────────────────────────
 
+    /** Fecha (día) del último lote de análisis ejecutado, o hoy si no hay datos. */
+    public java.time.LocalDate obtenerFechaUltimoLote() {
+        return analisisRepositorio.findMaxCalculadoEn()
+                .map(dt -> dt.toLocalDate())
+                .orElse(java.time.LocalDate.now());
+    }
+
     /**
      * Devuelve los análisis de la ÚLTIMA ejecución del motor.
      * Usa la ventana de ±30 min alrededor del timestamp más reciente.
@@ -837,6 +1209,27 @@ public class SugerenciaServicio {
                     log.warn(">>> [SUGERENCIAS] No hay análisis en la BD. Ejecuta primero el motor.");
                     return List.of();
                 });
+    }
+
+    // ─────────────────────────────────────────────────────────────────────────
+    // Deduplicación de selecciones en el output
+    // ─────────────────────────────────────────────────────────────────────────
+
+    /**
+     * Clave única que identifica una selección: partidoId + "_" + mercado.
+     * Usada para evitar que el mismo pick (mismo partido, mismo mercado) aparezca
+     * en múltiples sugerencias del mismo tipo dentro de la respuesta final.
+     */
+    private String claveSeleccion(SugerenciaLineaDTO linea) {
+        return linea.getIdPartido() + "_" + linea.getMercado();
+    }
+
+    /** Conjunto de claves de todas las selecciones de una sugerencia. */
+    private Set<String> clavesDeSelecciones(SugerenciaDTO sugerencia) {
+        if (sugerencia.getSelecciones() == null) return Set.of();
+        return sugerencia.getSelecciones().stream()
+                .map(this::claveSeleccion)
+                .collect(Collectors.toSet());
     }
 
     // ─────────────────────────────────────────────────────────────────────────
@@ -876,24 +1269,63 @@ public class SugerenciaServicio {
                 .filter(s -> "Triple".equals(s.getTipo()))
                 .collect(Collectors.toList());
 
-        // SIMPLES: máximo 1 por categoría — primer pick de cada categoría ordenado por score
-        // Así el usuario ve la mejor victoria + el mejor over/under goles + el mejor corners,
-        // en lugar de 3 corners distintos todos con edge positivo.
+        // ── SIMPLES: máximo 1 por categoría efectiva ─────────────────────────────
+        // Se usa categoriaEfectiva() para que CORNERS_OVER y CORNERS_UNDER sean
+        // slots independientes. Así "Más de 8.5 Corners" y "Menos de 12.5 Corners"
+        // pueden aparecer simultáneamente en lugar de competir por el mismo slot
+        // (donde "Menos de" siempre gana por mayor probabilidad y edge positivo).
+        // Mismo principio para GOLES_OVER/UNDER y CORNERS_EQUIPO_(LOCAL/VISITANTE)_(OVER/UNDER).
+        //
+        // Límite 5 para dar cabida a:
+        //   RESULTADO + GOLES_OVER/UNDER + CORNERS_UNDER + CORNERS_OVER
+        //   + CORNERS_EQUIPO_LOCAL_OVER o CORNERS_EQUIPO_VISITANTE_OVER (mejor por score)
         List<SugerenciaDTO> simplesFinales = new ArrayList<>();
         Set<String> categoriasYaEnSimples  = new HashSet<>();
         for (SugerenciaDTO s : simples) {
             if (s.getSelecciones() == null || s.getSelecciones().isEmpty()) continue;
-            String cat = s.getSelecciones().get(0).getCategoria();
-            if (categoriasYaEnSimples.add(cat)) {   // add() retorna true si era nuevo
+            String cat = categoriaEfectiva(s.getSelecciones().get(0));
+            if (categoriasYaEnSimples.add(cat)) {
                 simplesFinales.add(s);
-                if (simplesFinales.size() >= 3) break;
+                if (simplesFinales.size() >= 5) break;
+            }
+        }
+
+        // ── DOBLES: deduplicación por selección ───────────────────────────────────
+        // Si "GIL - Menos de 11.5 Corners" aparece en el mejor doble, NO puede
+        // aparecer en ningún otro doble de la respuesta. Se itera en orden de score
+        // descendente y se acepta cada doble solo si ninguna de sus selecciones
+        // ya fue usada en un doble anterior.
+        List<SugerenciaDTO> doblesFinales = new ArrayList<>();
+        Set<String> usadasEnDobles        = new HashSet<>();
+        for (SugerenciaDTO d : dobles) {
+            Set<String> claves = clavesDeSelecciones(d);
+            if (Collections.disjoint(claves, usadasEnDobles)) {
+                doblesFinales.add(d);
+                usadasEnDobles.addAll(claves);
+                if (doblesFinales.size() >= 3) break;
+            }
+        }
+
+        // ── TRIPLES: deduplicación independiente ──────────────────────────────────
+        // Misma lógica que dobles, pero el tracker es independiente.
+        // Una selección que aparece en un doble SÍ puede aparecer en un triple
+        // (son apuestas distintas que el usuario elige por separado), pero no
+        // puede repetirse dentro de los 3 triples mostrados.
+        List<SugerenciaDTO> triplesFinales = new ArrayList<>();
+        Set<String> usadasEnTriples        = new HashSet<>();
+        for (SugerenciaDTO t : triples) {
+            Set<String> claves = clavesDeSelecciones(t);
+            if (Collections.disjoint(claves, usadasEnTriples)) {
+                triplesFinales.add(t);
+                usadasEnTriples.addAll(claves);
+                if (triplesFinales.size() >= 3) break;
             }
         }
 
         List<SugerenciaDTO> respuesta = new ArrayList<>();
         respuesta.addAll(simplesFinales);
-        respuesta.addAll(dobles.stream().limit(3).collect(Collectors.toList()));
-        respuesta.addAll(triples.stream().limit(3).collect(Collectors.toList()));
+        respuesta.addAll(doblesFinales);
+        respuesta.addAll(triplesFinales);
 
         // Marcar la primera sugerencia como la apuesta del día
         if (!respuesta.isEmpty()) {
@@ -901,8 +1333,8 @@ public class SugerenciaServicio {
         }
 
         log.info(">>> [SUGERENCIAS] Respuesta: {} simples + {} dobles + {} triples = {} total (de {} candidatas)",
-                simplesFinales.size(), Math.min(dobles.size(), 3),
-                Math.min(triples.size(), 3), respuesta.size(), todas.size());
+                simplesFinales.size(), doblesFinales.size(),
+                triplesFinales.size(), respuesta.size(), todas.size());
 
         return respuesta;
     }

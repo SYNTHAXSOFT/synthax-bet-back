@@ -25,8 +25,11 @@ public class Analisis {
     @JoinColumn(name = "id_partido", nullable = false)
     private Partido partido;
 
+    // columnDefinition = "varchar(31)" evita que Hibernate 6 genere un CHECK constraint
+    // del tipo CHECK (categoria_mercado IN ('RESULTADO','GOLES',...)) que bloquearía
+    // la inserción de nuevos valores del enum (ej. CORNERS_EQUIPO) sin un ALTER TABLE.
     @Enumerated(EnumType.STRING)
-    @Column(name = "categoria_mercado", nullable = false)
+    @Column(name = "categoria_mercado", nullable = false, columnDefinition = "varchar(31)")
     private CategoriaAnalisis categoriaMercado;
 
     @Column(name = "nombre_mercado", nullable = false)
@@ -36,7 +39,7 @@ public class Analisis {
     private BigDecimal probabilidad;  // 0.8700 = 87%
 
     @Enumerated(EnumType.STRING)
-    @Column(name = "nivel_confianza")
+    @Column(name = "nivel_confianza", columnDefinition = "varchar(31)")
     private NivelConfianza nivelConfianza;
 
     // Variables usadas en el cálculo — snapshot JSON para auditoría

@@ -530,11 +530,17 @@ public class ApiFootballAdaptador implements ProveedorFutbol, ProveedorCuotas {
                     ext.setPromedioTarjetasAmarillas(totalTarjetas / totalFixtures);
                 }
             }
+            // Split corners casa — permite a CalculadoraCorners usar contexto local/visita real
             if (contCasa > 0) {
-                ext.setPromedioTarjetasCasa(tarjetasCasa / contCasa);
+                ext.setPromedioCornersFavorCasa(cornersFavorCasa   / contCasa);
+                ext.setPromedioCornersContraCasa(cornersContraCasa / contCasa);
+                ext.setPromedioTarjetasCasa(tarjetasCasa           / contCasa);
             }
+            // Split corners visita
             if (contVisita > 0) {
-                ext.setPromedioTarjetasVisita(tarjetasVisita / contVisita);
+                ext.setPromedioCornersFavorVisita(cornersFavorVisita    / contVisita);
+                ext.setPromedioCornersContraVisita(cornersContraVisita  / contVisita);
+                ext.setPromedioTarjetasVisita(tarjetasVisita            / contVisita);
             }
 
             // Goles recientes — forma de los últimos partidos para decay temporal
@@ -544,21 +550,19 @@ public class ApiFootballAdaptador implements ProveedorFutbol, ProveedorCuotas {
             }
 
             log.info(">>> [FIXTURE-STATS] equipo {} | fixtures={} (casa={}, visita={}) | "
-                            + "corners F/C: {}/{} | tarjetas casa/vis: {}/{} | "
-                            + "goles recientes F/C: {}/{}",
+                            + "corners tot F/C: {}/{} | corners casa F/C: {}/{} | corners vis F/C: {}/{} | "
+                            + "tarjetas casa/vis: {}/{} | goles recientes F/C: {}/{}",
                     idEquipo, totalFixtures, contCasa, contVisita,
-                    ext.getPromedioCornersFavor() != null
-                            ? String.format("%.2f", ext.getPromedioCornersFavor()) : "N/A",
-                    ext.getPromedioCornersContra() != null
-                            ? String.format("%.2f", ext.getPromedioCornersContra()) : "N/A",
-                    ext.getPromedioTarjetasCasa() != null
-                            ? String.format("%.2f", ext.getPromedioTarjetasCasa()) : "N/A",
-                    ext.getPromedioTarjetasVisita() != null
-                            ? String.format("%.2f", ext.getPromedioTarjetasVisita()) : "N/A",
-                    ext.getPromedioGolesFavorReciente() != null
-                            ? String.format("%.2f", ext.getPromedioGolesFavorReciente()) : "N/A",
-                    ext.getPromedioGolesContraReciente() != null
-                            ? String.format("%.2f", ext.getPromedioGolesContraReciente()) : "N/A");
+                    ext.getPromedioCornersFavor()        != null ? String.format("%.2f", ext.getPromedioCornersFavor())        : "N/A",
+                    ext.getPromedioCornersContra()       != null ? String.format("%.2f", ext.getPromedioCornersContra())       : "N/A",
+                    ext.getPromedioCornersFavorCasa()    != null ? String.format("%.2f", ext.getPromedioCornersFavorCasa())    : "N/A",
+                    ext.getPromedioCornersContraCasa()   != null ? String.format("%.2f", ext.getPromedioCornersContraCasa())   : "N/A",
+                    ext.getPromedioCornersFavorVisita()  != null ? String.format("%.2f", ext.getPromedioCornersFavorVisita())  : "N/A",
+                    ext.getPromedioCornersContraVisita() != null ? String.format("%.2f", ext.getPromedioCornersContraVisita()) : "N/A",
+                    ext.getPromedioTarjetasCasa()        != null ? String.format("%.2f", ext.getPromedioTarjetasCasa())        : "N/A",
+                    ext.getPromedioTarjetasVisita()      != null ? String.format("%.2f", ext.getPromedioTarjetasVisita())      : "N/A",
+                    ext.getPromedioGolesFavorReciente()  != null ? String.format("%.2f", ext.getPromedioGolesFavorReciente())  : "N/A",
+                    ext.getPromedioGolesContraReciente() != null ? String.format("%.2f", ext.getPromedioGolesContraReciente()) : "N/A");
 
             // Marcar como procesado para no repetir en esta sesión
             gestorCache.guardar(cacheKey, Boolean.TRUE, 3600);
@@ -636,7 +640,7 @@ public class ApiFootballAdaptador implements ProveedorFutbol, ProveedorCuotas {
                     ? fixture.getGoals().getAway() : -1;
 
             ResultadoFixtureDTO resultado = new ResultadoFixtureDTO(
-                    golesLocal, golesVisitante, -1, -1, estadoNorm);
+                    golesLocal, golesVisitante, -1, -1, -1, -1, estadoNorm);
 
             // 2. Corners y tarjetas desde fixture statistics
             if (gestorCache.puedeHacerRequest()) {
@@ -653,13 +657,16 @@ public class ApiFootballAdaptador implements ProveedorFutbol, ProveedorCuotas {
                         List<ApiFootballFixtureStatisticsDTO> statsDtos =
                                 objectMapper.convertValue(responseStats, new TypeReference<>() {});
 
-                        int totalCorners   = 0;
-                        int totalTarjetas  = 0;
+                        // statsDtos[0] = equipo local, statsDtos[1] = equipo visitante
+                        int cornersLocalVal     = statsDtos.size() > 0 ? extraerStat(statsDtos.get(0), "Corner Kicks") : 0;
+                        int cornersVisitanteVal = statsDtos.size() > 1 ? extraerStat(statsDtos.get(1), "Corner Kicks") : 0;
+                        int totalTarjetas       = 0;
                         for (ApiFootballFixtureStatisticsDTO s : statsDtos) {
-                            totalCorners  += extraerStat(s, "Corner Kicks");
                             totalTarjetas += extraerStat(s, "Yellow Cards");
                         }
-                        resultado.setCorners(totalCorners);
+                        resultado.setCorners(cornersLocalVal + cornersVisitanteVal);
+                        resultado.setCornersLocal(cornersLocalVal);
+                        resultado.setCornersVisitante(cornersVisitanteVal);
                         resultado.setTarjetas(totalTarjetas);
                     }
                 } catch (Exception e) {
@@ -667,9 +674,10 @@ public class ApiFootballAdaptador implements ProveedorFutbol, ProveedorCuotas {
                 }
             }
 
-            log.info(">>> Resultado fixture {}: {}–{} | corners={} | tarjetas={}",
+            log.info(">>> Resultado fixture {}: {}–{} | corners={} (L={} V={}) | tarjetas={}",
                     fixtureId, golesLocal, golesVisitante,
-                    resultado.getCorners(), resultado.getTarjetas());
+                    resultado.getCorners(), resultado.getCornersLocal(),
+                    resultado.getCornersVisitante(), resultado.getTarjetas());
 
             return Optional.of(resultado);
 

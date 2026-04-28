@@ -49,12 +49,27 @@ public class EstadisticaEquipo {
     @Column(name = "promedio_goles_contra_visita", precision = 5, scale = 2)
     private BigDecimal promedioGolesContraVisita;
 
-    // Corners
+    // Corners — promedio total (todos los partidos)
     @Column(name = "promedio_corners_favor", precision = 5, scale = 2)
     private BigDecimal promedioCornersFavor;
 
     @Column(name = "promedio_corners_contra", precision = 5, scale = 2)
     private BigDecimal promedioCornersContra;
+
+    // Corners — split casa / visita (calculado desde historial de fixtures)
+    // Permite al modelo Poisson usar el contexto real del partido en lugar del promedio global.
+    // Un equipo top puede generar 6.5 corners en casa pero solo 4.2 de visitante.
+    @Column(name = "promedio_corners_favor_casa", precision = 5, scale = 2)
+    private BigDecimal promedioCornersFavorCasa;
+
+    @Column(name = "promedio_corners_favor_visita", precision = 5, scale = 2)
+    private BigDecimal promedioCornersFavorVisita;
+
+    @Column(name = "promedio_corners_contra_casa", precision = 5, scale = 2)
+    private BigDecimal promedioCornersContraCasa;
+
+    @Column(name = "promedio_corners_contra_visita", precision = 5, scale = 2)
+    private BigDecimal promedioCornersContraVisita;
 
     // Tarjetas — total temporada
     @Column(name = "promedio_tarjetas", precision = 5, scale = 2)

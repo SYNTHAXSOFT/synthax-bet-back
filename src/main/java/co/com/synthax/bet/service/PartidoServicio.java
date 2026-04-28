@@ -38,15 +38,28 @@ public class PartidoServicio {
     /**
      * Obtiene partidos de una fecha específica.
      * Sincroniza desde la API si la BD no tiene datos del día.
+     *
+     * ── Buffer de ±6 horas ──────────────────────────────────────────────────
+     * Usa el mismo rango que sincronizarPartidos() para garantizar que todos
+     * los partidos guardados en esa sincronización sean encontrados aquí.
+     *
+     * El servidor puede correr en UTC mientras los partidos están almacenados
+     * con hora colombiana (UTC-5). Con el rango estricto medianoche-a-medianoche
+     * los partidos de tarde/noche colombiana (almacenados como horas UTC del día
+     * siguiente) caen fuera del rango y no aparecen.
+     *
+     * El buffer ±6 h cubre cualquier offset de timezone sin incluir partidos
+     * de días anteriores ya que la sincronización limpia ese rango antes de
+     * insertar datos frescos.
      */
     public List<Partido> obtenerPartidosPorFecha(LocalDate fecha) {
-        LocalDateTime inicioDia = fecha.atStartOfDay();
-        LocalDateTime finDia = fecha.atTime(23, 59, 59);
+        LocalDateTime inicioDia = fecha.atTime(0, 0).minusHours(6);   // ayer 18:00
+        LocalDateTime finDia    = fecha.atTime(23, 59).plusHours(6);   // mañana 05:59
 
         List<Partido> enBd = partidoRepositorio.findByFechaPartidoBetween(inicioDia, finDia);
 
         if (!enBd.isEmpty()) {
-            log.info(">>> {} partidos encontrados en BD para {}", enBd.size(), fecha);
+            log.info(">>> {} partidos encontrados en BD para {} (rango ±6h)", enBd.size(), fecha);
             return enBd;
         }
 
@@ -78,13 +91,19 @@ public class PartidoServicio {
         if (!existentes.isEmpty()) {
             List<Long> ids = existentes.stream().map(Partido::getId).toList();
 
-            // Eliminar cuotas y análisis (regenerables). Los Picks NO se tocan
-            // porque son datos del usuario — sus referencias a Partido siguen
-            // siendo válidas tras el upsert (mismo ID de BD).
+            // Solo se eliminan las CUOTAS porque son datos externos regenerables desde la API.
+            // Los ANÁLISIS NO se borran aquí: AnalisisServicio.ejecutarAnalisisDelDia() ya
+            // limpia el día completo con deleteByCalculadoEnBetween() antes de cada ejecución.
+            //
+            // ¿Por qué no borrar análisis aquí?
+            // El rango ±6h usado en sincronizarPartidos() se solapa con el día anterior/siguiente.
+            // Ejemplo: sincronizarPartidos(mañana) usa desde=hoy-18:00; si se borraran análisis
+            // por idPartido, se eliminarían los análisis de los partidos nocturnos de HOY que
+            // caen en ese rango — borrando silenciosamente el trabajo del motor del día actual.
+            // Los Picks NO se tocan porque son datos del usuario.
             cuotaRepositorio.deleteByPartidoIdIn(ids);
-            analisisRepositorio.deleteByPartidoIdIn(ids);
 
-            log.info(">>> Cuotas y análisis de {} partidos borrados antes de re-sincronizar (picks intactos)", existentes.size());
+            log.info(">>> Cuotas de {} partidos borradas antes de re-sincronizar (análisis y picks intactos)", existentes.size());
         }
 
         List<PartidoExterno> externos = proveedorFutbol.obtenerPartidosDelDia(fecha);

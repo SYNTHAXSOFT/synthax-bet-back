@@ -26,9 +26,15 @@ public class EstadisticaExterna {
     private Double promedioGolesContraCasa;
     private Double promedioGolesContraVisita;
 
-    // Corners
+    // Corners — promedio total
     private Double promedioCornersFavor;
     private Double promedioCornersContra;
+
+    // Corners — split casa / visita (calculado desde historial de fixtures)
+    private Double promedioCornersFavorCasa;
+    private Double promedioCornersFavorVisita;
+    private Double promedioCornersContraCasa;
+    private Double promedioCornersContraVisita;
 
     // Tarjetas — total temporada
     private Double promedioTarjetasAmarillas;

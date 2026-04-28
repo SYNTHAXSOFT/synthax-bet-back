@@ -159,7 +159,36 @@ public class NormalizadorMercado {
             Map.entry("AH Local -1.5",     "Asian Handicap - Home -1.5"),
             Map.entry("AH Visitante +0.5", "Asian Handicap - Away +0.5"),
             Map.entry("AH Visitante +1.0", "Asian Handicap - Away +1.0"),
-            Map.entry("AH Visitante +1.5", "Asian Handicap - Away +1.5")
+            Map.entry("AH Visitante +1.5", "Asian Handicap - Away +1.5"),
+
+            // ── Corners por equipo (local / visitante) ────────────────────────────
+            // Mercado: cuántos corners GENERA únicamente el equipo local o el visitante.
+            // API-Football: "Team Corners - Home Over 3.5" / "Team Corners - Away Under 4.5".
+            // Diferente al total de corners del partido (ambos equipos sumados).
+            Map.entry("Local Más de 1.5 Corners",      "Team Corners - Home Over 1.5"),
+            Map.entry("Local Menos de 1.5 Corners",    "Team Corners - Home Under 1.5"),
+            Map.entry("Local Más de 2.5 Corners",      "Team Corners - Home Over 2.5"),
+            Map.entry("Local Menos de 2.5 Corners",    "Team Corners - Home Under 2.5"),
+            Map.entry("Local Más de 3.5 Corners",      "Team Corners - Home Over 3.5"),
+            Map.entry("Local Menos de 3.5 Corners",    "Team Corners - Home Under 3.5"),
+            Map.entry("Local Más de 4.5 Corners",      "Team Corners - Home Over 4.5"),
+            Map.entry("Local Menos de 4.5 Corners",    "Team Corners - Home Under 4.5"),
+            Map.entry("Local Más de 5.5 Corners",      "Team Corners - Home Over 5.5"),
+            Map.entry("Local Menos de 5.5 Corners",    "Team Corners - Home Under 5.5"),
+            Map.entry("Local Más de 6.5 Corners",      "Team Corners - Home Over 6.5"),
+            Map.entry("Local Menos de 6.5 Corners",    "Team Corners - Home Under 6.5"),
+            Map.entry("Visitante Más de 1.5 Corners",      "Team Corners - Away Over 1.5"),
+            Map.entry("Visitante Menos de 1.5 Corners",    "Team Corners - Away Under 1.5"),
+            Map.entry("Visitante Más de 2.5 Corners",      "Team Corners - Away Over 2.5"),
+            Map.entry("Visitante Menos de 2.5 Corners",    "Team Corners - Away Under 2.5"),
+            Map.entry("Visitante Más de 3.5 Corners",      "Team Corners - Away Over 3.5"),
+            Map.entry("Visitante Menos de 3.5 Corners",    "Team Corners - Away Under 3.5"),
+            Map.entry("Visitante Más de 4.5 Corners",      "Team Corners - Away Over 4.5"),
+            Map.entry("Visitante Menos de 4.5 Corners",    "Team Corners - Away Under 4.5"),
+            Map.entry("Visitante Más de 5.5 Corners",      "Team Corners - Away Over 5.5"),
+            Map.entry("Visitante Menos de 5.5 Corners",    "Team Corners - Away Under 5.5"),
+            Map.entry("Visitante Más de 6.5 Corners",      "Team Corners - Away Over 6.5"),
+            Map.entry("Visitante Menos de 6.5 Corners",    "Team Corners - Away Under 6.5")
     );
 
     /**
@@ -257,6 +286,26 @@ public class NormalizadorMercado {
                     && casaNorm.contains("corner")
                     && !casaNorm.contains("team corner")
                     && !casaNorm.contains("team's corner")
+                    && casaNorm.contains(dir + " " + umbral)) {
+                return true;
+            }
+        }
+
+        // 3b. Semántica para CORNERS POR EQUIPO (Local / Visitante):
+        //    "Local Más de 3.5 Corners"      → "Team Corners - Home Over 3.5"
+        //    "Visitante Menos de 4.5 Corners" → "Team Corners - Away Under 4.5"
+        //    Se exige que el nombre de la casa contenga "team" para distinguir de los
+        //    corners totales del partido (que NO tienen "team" en el nombre).
+        if ((motorNorm.startsWith("local ") || motorNorm.startsWith("visitante "))
+                && motorNorm.contains("corners")) {
+            String umbral = extraerUmbral(motorNorm);
+            String equipo = motorNorm.startsWith("local") ? "home" : "away";
+            String dir    = (motorNorm.contains("más de") || motorNorm.contains("mas de"))
+                            ? "over" : "under";
+            if (umbral != null
+                    && casaNorm.contains("team")
+                    && casaNorm.contains("corner")
+                    && casaNorm.contains(equipo)
                     && casaNorm.contains(dir + " " + umbral)) {
                 return true;
             }

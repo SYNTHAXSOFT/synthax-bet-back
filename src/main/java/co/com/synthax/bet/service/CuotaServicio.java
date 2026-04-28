@@ -160,8 +160,9 @@ public class CuotaServicio {
                     .build();
         }
 
-        // Procesar como máximo MAX_PARTIDOS_A_INGESTAR partidos en una sola
-        // ejecución, o menos si el cupo restante es más pequeño.
+        // El presupuesto real lo decide el GestorCache (requestsDisponiblesParaCuotas).
+        // MAX_PARTIDOS_A_INGESTAR es un techo de seguridad para días excepcionales
+        // con muchos partidos; en la práctica el cupo diario disponible es el límite.
         int presupuesto = Math.min(disponiblesParaCuotas, MAX_PARTIDOS_A_INGESTAR);
 
         List<Partido> conApiId = partidos.stream()
@@ -205,64 +206,68 @@ public class CuotaServicio {
         estadoEjecucion.iniciar("CUOTAS", conApiId.size());
         int cuotasIdx = 0;
         try {
-        for (Partido partido : conApiId) {
-            estadoEjecucion.actualizarProgreso(cuotasIdx,
-                    String.format("%s vs %s (%d/%d)",
-                            partido.getEquipoLocal(), partido.getEquipoVisitante(),
-                            cuotasIdx + 1, conApiId.size()));
-            cuotasIdx++;
-            try {
-                List<CuotaExterna> externas =
-                        proveedorCuotas.obtenerCuotasPorPartido(partido.getIdPartidoApi());
+            for (Partido partido : conApiId) {
+                try {
+                    List<CuotaExterna> externas =
+                            proveedorCuotas.obtenerCuotasPorPartido(partido.getIdPartidoApi());
 
-                if (externas.isEmpty()) {
-                    String etiqueta = partido.getEquipoLocal() + " vs " + partido.getEquipoVisitante();
-                    partidosSinCuotas.add(etiqueta);
-                    log.warn(">>> [CUOTAS] API devolvió 0 cuotas para fixture {} ({}) — " +
-                                    "posible causa: fixture sin odds en API, plan sin acceso a esa liga, " +
-                                    "o partido demasiado lejano para que la casa publique cuotas",
-                            partido.getIdPartidoApi(), etiqueta);
-                    continue;
+                    if (externas.isEmpty()) {
+                        String etiqueta = partido.getEquipoLocal() + " vs " + partido.getEquipoVisitante();
+                        partidosSinCuotas.add(etiqueta);
+                        log.warn(">>> [CUOTAS] API devolvió 0 cuotas para fixture {} ({}) — " +
+                                        "posible causa: fixture sin odds en API, plan sin acceso a esa liga, " +
+                                        "o partido demasiado lejano para que la casa publique cuotas",
+                                partido.getIdPartidoApi(), etiqueta);
+                    } else {
+                        Map<String, Cuota> indicePartido =
+                                indiceGlobal.getOrDefault(partido.getId(), Map.of());
+
+                        int porPartido = 0;
+                        for (CuotaExterna ext : externas) {
+                            if (ext.getValorCuota() == null || ext.getValorCuota() <= 1.0
+                                    || ext.getValorCuota() > 1000.0) continue;
+
+                            String clave = claveUpsert(ext.getCasaApuestas(), ext.getNombreMercado());
+                            Cuota cuota  = indicePartido.containsKey(clave)
+                                    ? indicePartido.get(clave)
+                                    : new Cuota();
+
+                            cuota.setPartido(partido);
+                            cuota.setCasaApuestas(ext.getCasaApuestas());
+                            cuota.setNombreMercado(ext.getNombreMercado());
+                            cuota.setValorCuota(
+                                    BigDecimal.valueOf(ext.getValorCuota()).setScale(3, RoundingMode.HALF_UP));
+
+                            todasAGuardar.add(cuota);
+                            porPartido++;
+                        }
+                        log.info(">>> [CUOTAS] {} cuotas preparadas para {} vs {}",
+                                porPartido, partido.getEquipoLocal(), partido.getEquipoVisitante());
+                    }
+                } catch (Exception e) {
+                    log.error(">>> [CUOTAS] Error en partido {} vs {}: {}",
+                            partido.getEquipoLocal(), partido.getEquipoVisitante(), e.getMessage());
                 }
 
-                Map<String, Cuota> indicePartido =
-                        indiceGlobal.getOrDefault(partido.getId(), Map.of());
-
-                int porPartido = 0;
-                for (CuotaExterna ext : externas) {
-                    if (ext.getValorCuota() == null || ext.getValorCuota() <= 1.0
-                            || ext.getValorCuota() > 1000.0) continue;
-
-                    String clave = claveUpsert(ext.getCasaApuestas(), ext.getNombreMercado());
-                    Cuota cuota  = indicePartido.containsKey(clave)
-                            ? indicePartido.get(clave)
-                            : new Cuota();
-
-                    cuota.setPartido(partido);
-                    cuota.setCasaApuestas(ext.getCasaApuestas());
-                    cuota.setNombreMercado(ext.getNombreMercado());
-                    cuota.setValorCuota(
-                            BigDecimal.valueOf(ext.getValorCuota()).setScale(3, RoundingMode.HALF_UP));
-
-                    todasAGuardar.add(cuota);
-                    porPartido++;
-                }
-
-                log.info(">>> [CUOTAS] {} cuotas preparadas para {} vs {}",
-                        porPartido, partido.getEquipoLocal(), partido.getEquipoVisitante());
-
-            } catch (Exception e) {
-                log.error(">>> [CUOTAS] Error en partido {} vs {}: {}",
-                        partido.getEquipoLocal(), partido.getEquipoVisitante(), e.getMessage());
+                // Progreso DESPUÉS de procesar cada partido (no antes),
+                // así el % refleja trabajo real completado.
+                cuotasIdx++;
+                estadoEjecucion.actualizarProgreso(cuotasIdx,
+                        String.format("%s vs %s (%d/%d)",
+                                partido.getEquipoLocal(), partido.getEquipoVisitante(),
+                                cuotasIdx, conApiId.size()));
             }
-        }
-        } finally {
-            estadoEjecucion.completar();
-        }
 
-        // ── Paso 4: un único saveAll() para todos los partidos ───────────────
-        if (!todasAGuardar.isEmpty()) {
-            cuotaRepositorio.saveAll(todasAGuardar);
+            // ── Paso 4: saveAll() DENTRO del try, antes del completar() ─────────
+            // Así la barra no llega al 100% mientras la BD sigue escribiendo.
+            if (!todasAGuardar.isEmpty()) {
+                estadoEjecucion.actualizarProgreso(cuotasIdx, "Guardando en base de datos...");
+                cuotaRepositorio.saveAll(todasAGuardar);
+            }
+
+        } finally {
+            // completar() corre DESPUÉS de que el saveAll() haya terminado.
+            estadoEjecucion.completar();
         }
 
         int usadosDespues = gestorCache.contarRequestsHoy();
@@ -332,7 +337,7 @@ public class CuotaServicio {
      *   2. Ejecutar análisis      (manual — admin selecciona ligas)
      *   3. Ingestar cuotas        (manual o automático DESPUÉS del análisis)
      */
-    private static final int MAX_PARTIDOS_A_INGESTAR = 30;
+    private static final int MAX_PARTIDOS_A_INGESTAR = 100;
 
     /** IDs de ligas pre-seleccionadas por defecto en el modal de selección. */
     private static final Set<String> LIGAS_FAVORITAS = Set.of(
@@ -355,27 +360,41 @@ public class CuotaServicio {
     );
 
     private List<Partido> obtenerPartidosConAnalisis() {
-        LocalDateTime inicioDia = LocalDate.now().atStartOfDay();
-        LocalDateTime finDia    = LocalDate.now().atTime(23, 59, 59);
+        // Usa el mismo criterio que SugerenciaServicio.obtenerAnalisisMasReciente():
+        // toma TODOS los análisis del último batch (ventana de ±30 min alrededor del
+        // timestamp más reciente). Esto evita el problema de corte por fecha cuando:
+        //   - El servidor corre en UTC y el usuario está en UTC-5 (Colombia)
+        //   - El análisis se ejecutó cerca de medianoche
+        //   - El análisis se ejecutó ayer y la ingesta se lanza hoy
+        // Con este enfoque, la ingesta siempre trabaja sobre el mismo pool que
+        // las sugerencias del día, sin importar el timezone del servidor.
+        Optional<LocalDateTime> maxFechaOpt = analisisRepositorio.findMaxCalculadoEn();
 
-        List<Analisis> analisisHoy = analisisRepositorio.findByCalculadoEnBetween(inicioDia, finDia);
-        if (!analisisHoy.isEmpty()) {
-            log.info(">>> [CUOTAS] {} análisis de hoy → determinando partidos a ingestar",
-                    analisisHoy.size());
-            return analisisHoy.stream()
-                    .map(Analisis::getPartido)
-                    .filter(p -> p.getIdPartidoApi() != null)
-                    .collect(Collectors.collectingAndThen(
-                            Collectors.toMap(Partido::getId, p -> p, (a, b) -> a),
-                            map -> new java.util.ArrayList<>(map.values())
-                    ));
+        if (maxFechaOpt.isEmpty()) {
+            log.warn(">>> [CUOTAS] Sin análisis en BD. Ejecuta el motor de análisis primero.");
+            return List.of();
         }
 
-        // Sin análisis → lista vacía. La ingesta abortará con motivo "SIN_PARTIDOS".
-        // NO se usa fallback a todos los partidos del día: eso consumía ~40 requests
-        // automáticamente en el scheduler de 7:30 AM sin ningún valor real.
-        log.warn(">>> [CUOTAS] Sin análisis de hoy. Ejecuta el motor de análisis primero.");
-        return List.of();
+        LocalDateTime maxFecha = maxFechaOpt.get();
+        LocalDateTime ini      = maxFecha.minusMinutes(30);
+
+        List<Analisis> analisisRecientes = analisisRepositorio.findByCalculadoEnBetween(ini, maxFecha);
+
+        if (analisisRecientes.isEmpty()) {
+            log.warn(">>> [CUOTAS] Sin análisis en el último batch. Ejecuta el motor primero.");
+            return List.of();
+        }
+
+        log.info(">>> [CUOTAS] Último batch: {} → {} análisis → determinando partidos a ingestar",
+                maxFecha, analisisRecientes.size());
+
+        return analisisRecientes.stream()
+                .map(Analisis::getPartido)
+                .filter(p -> p.getIdPartidoApi() != null)
+                .collect(Collectors.collectingAndThen(
+                        Collectors.toMap(Partido::getId, p -> p, (a, b) -> a),
+                        map -> new java.util.ArrayList<>(map.values())
+                ));
     }
 
     /**
@@ -465,8 +484,11 @@ public class CuotaServicio {
      * Usado por el front-end para poblar el modal de selección de ligas.
      */
     public List<LigaDisponibleDTO> ligasDisponiblesHoy() {
-        LocalDateTime desde = LocalDate.now().atStartOfDay();
-        LocalDateTime hasta = LocalDate.now().atTime(23, 59, 59);
+        // Mismo buffer ±6 h que PartidoServicio.obtenerPartidosPorFecha() y
+        // sincronizarPartidos(), para que el modal muestre exactamente las ligas
+        // que el motor va a encontrar cuando el admin pulse "Ejecutar análisis".
+        LocalDateTime desde = LocalDate.now().atTime(0, 0).minusHours(6);
+        LocalDateTime hasta = LocalDate.now().atTime(23, 59).plusHours(6);
 
         List<Object[]> filas = partidoRepositorio.findLigasAgrupadas(desde, hasta);
 
@@ -513,8 +535,8 @@ public class CuotaServicio {
         List<Partido> partidos = obtenerPartidosConAnalisis();
         resultado.put("paso2_partidosConAnalisis", partidos.size());
 
-        LocalDateTime inicioDia = LocalDate.now().atStartOfDay();
-        LocalDateTime finDia    = LocalDate.now().atTime(23, 59, 59);
+        LocalDateTime inicioDia = LocalDate.now().atTime(0, 0).minusHours(6);
+        LocalDateTime finDia    = LocalDate.now().atTime(23, 59).plusHours(6);
         int totalPartidosHoy = (int) partidoRepositorio.findByFechaPartidoBetween(inicioDia, finDia).stream().count();
         resultado.put("paso2_totalPartidosHoy", totalPartidosHoy);
         resultado.put("paso2_detalle", "Solo se ingestarán cuotas para los partidos con análisis, " +
