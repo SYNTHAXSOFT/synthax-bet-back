@@ -3,6 +3,7 @@ package co.com.synthax.bet.infraestructura.scheduler;
 import co.com.synthax.bet.service.CuotaServicio;
 import co.com.synthax.bet.service.PartidoServicio;
 import co.com.synthax.bet.service.PickServicio;
+import co.com.synthax.bet.service.ResolucionServicio;
 import lombok.RequiredArgsConstructor;
 import lombok.extern.slf4j.Slf4j;
 import org.springframework.scheduling.annotation.Scheduled;
@@ -26,9 +27,10 @@ import java.time.LocalTime;
 @RequiredArgsConstructor
 public class TareasDiarias {
 
-    private final PartidoServicio partidoServicio;
-    private final CuotaServicio   cuotaServicio;
-    private final PickServicio    pickServicio;
+    private final PartidoServicio    partidoServicio;
+    private final CuotaServicio      cuotaServicio;
+    private final PickServicio       pickServicio;
+    private final ResolucionServicio resolucionServicio;
 
     /**
      * Sincroniza los partidos del día todos los días a las 6:00 AM.
@@ -117,6 +119,29 @@ public class TareasDiarias {
             log.info(">>> [TAREA DIARIA] Partidos de mañana pre-cargados correctamente");
         } catch (Exception e) {
             log.error(">>> [TAREA DIARIA] Error al pre-cargar partidos: {}", e.getMessage());
+        }
+    }
+
+    /**
+     * Guarda el snapshot diario de sugerencias + resultados en el historial a las 11:30 PM.
+     *
+     * Se ejecuta después de resolverPicksPendientes (22:00) para que la mayoría de
+     * partidos ya estén finalizados en la API. El snapshot queda persistido en la tabla
+     * resoluciones_historial y aparece automáticamente como botón de fecha en la pantalla
+     * "Resolver análisis" al día siguiente, sin que el administrador tenga que entrar
+     * manualmente a esa pantalla.
+     *
+     * Si el motor no fue ejecutado ese día (pool vacío), la tarea termina sin guardar nada.
+     */
+    @Scheduled(cron = "0 30 23 * * *")
+    public void guardarSnapshotDiario() {
+        log.info(">>> [TAREA DIARIA] Guardando snapshot de sugerencias del día - {}", LocalDate.now());
+        try {
+            var resoluciones = resolucionServicio.resolverUltimoBatch();
+            log.info(">>> [TAREA DIARIA] Snapshot guardado — {} sugerencias persistidas en historial - {}",
+                    resoluciones.size(), LocalTime.now());
+        } catch (Exception e) {
+            log.error(">>> [TAREA DIARIA] Error al guardar snapshot diario: {}", e.getMessage());
         }
     }
 }

@@ -25,6 +25,7 @@ public class ResolucionDTO {
     private String  partido;          // "Real Madrid vs Barcelona"
     private String  liga;
     private String  horaPartido;      // "20:00" hora colombiana
+    private String  fechaPartido;     // "28/04/2025" formato dd/MM/yyyy
     private String  categoria;        // "RESULTADO", "GOLES", etc.
     private String  mercado;          // "1X2 - Local", "Over 2.5", etc.
     private Double  probabilidad;     // 0.0 a 1.0 — confianza del motor

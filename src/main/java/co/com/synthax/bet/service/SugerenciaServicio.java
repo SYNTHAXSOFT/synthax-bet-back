@@ -780,7 +780,8 @@ public class SugerenciaServicio {
         return linea.getProbabilidad() * (1.0 + Math.max(0.0, edge) * 1.5);
     }
 
-    private static final DateTimeFormatter HORA_COL = DateTimeFormatter.ofPattern("HH:mm");
+    private static final DateTimeFormatter HORA_COL  = DateTimeFormatter.ofPattern("HH:mm");
+    private static final DateTimeFormatter FECHA_COL = DateTimeFormatter.ofPattern("dd/MM/yyyy");
 
     /**
      * Convierte un Analisis en SugerenciaLineaDTO con cuota real y edge calculados.
@@ -793,9 +794,12 @@ public class SugerenciaServicio {
         Partido p    = a.getPartido();
         double  prob = a.getProbabilidad().doubleValue();
 
-        // Hora colombiana del partido — null-safe (algunos partidos sin hora definida)
-        String horaPartido = (p.getFechaPartido() != null)
+        // Hora y fecha colombiana del partido — null-safe (algunos partidos sin hora definida)
+        String horaPartido  = (p.getFechaPartido() != null)
                 ? p.getFechaPartido().format(HORA_COL)
+                : null;
+        String fechaPartido = (p.getFechaPartido() != null)
+                ? p.getFechaPartido().format(FECHA_COL)
                 : null;
 
         String nombreCasa = normalizadorMercado.aCasa(a.getNombreMercado());
@@ -909,6 +913,7 @@ public class SugerenciaServicio {
                 p.getEquipoLocal() + " vs " + p.getEquipoVisitante(),
                 p.getLiga(),
                 horaPartido,
+                fechaPartido,
                 a.getCategoriaMercado().name(),
                 a.getNombreMercado(),
                 Math.round(prob * 10000.0) / 10000.0,
@@ -1157,6 +1162,37 @@ public class SugerenciaServicio {
         List<SugerenciaLineaDTO> pool = construirPool(aptos, cuotasMap, false);
         log.info(">>> [POOL-DIA] {} candidatos con cuota real para diagnóstico", pool.size());
         return pool;
+    }
+
+    /**
+     * Líneas individuales únicas que forman parte de las sugerencias del día.
+     *
+     * A diferencia de obtenerPoolDelDia() — que devuelve todos los candidatos
+     * que pasaron los umbrales — este método devuelve únicamente las patas que
+     * efectivamente aparecen en alguna sugerencia (Simple, Doble o Triple)
+     * generada por generarSugerenciasDelDia().
+     *
+     * Usado por ResolucionServicio para que la tabla de "Resolver análisis"
+     * muestre exactamente las mismas apuestas que la pantalla "Sugerencias".
+     */
+    public List<SugerenciaLineaDTO> obtenerLineasSugeridasDelDia() {
+        List<SugerenciaDTO> sugerencias = generarSugerenciasDelDia();
+        if (sugerencias.isEmpty()) return List.of();
+
+        // Deduplicar por (idPartido, mercado) respetando el orden de aparición.
+        // Una misma pata puede estar en un Simple, en un Doble y en un Triple;
+        // en la tabla de resolución debe aparecer solo una vez.
+        Map<String, SugerenciaLineaDTO> vistas = new LinkedHashMap<>();
+        for (SugerenciaDTO sug : sugerencias) {
+            if (sug.getSelecciones() == null) continue;
+            for (SugerenciaLineaDTO linea : sug.getSelecciones()) {
+                String clave = linea.getIdPartido() + "_" + linea.getMercado();
+                vistas.putIfAbsent(clave, linea);
+            }
+        }
+        List<SugerenciaLineaDTO> resultado = new ArrayList<>(vistas.values());
+        log.info(">>> [LINEAS-SUGERIDAS] {} líneas únicas de {} sugerencias", resultado.size(), sugerencias.size());
+        return resultado;
     }
 
     // ─────────────────────────────────────────────────────────────────────────

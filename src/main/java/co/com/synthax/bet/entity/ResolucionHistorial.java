@@ -40,6 +40,9 @@ public class ResolucionHistorial {
     @Column(name = "hora_partido")
     private String horaPartido;
 
+    @Column(name = "fecha_partido")
+    private String fechaPartido;
+
     @Column(name = "categoria")
     private String categoria;
 

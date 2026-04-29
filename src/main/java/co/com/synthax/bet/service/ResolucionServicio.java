@@ -23,12 +23,12 @@ import java.util.stream.Collectors;
 /**
  * Diagnóstico post-partido de las sugerencias del motor.
  *
- * Fuente: el POOL del motor de sugerencias — las patas individuales que pasaron
- * todos los umbrales (prob, edge, cuota real) para el último batch de análisis.
- * Esto es exactamente lo que el motor habría sugerido apostar.
+ * Fuente: las líneas individuales únicas que forman parte de las sugerencias del día
+ * (Simple, Doble y Triple). Es exactamente el mismo conjunto de patas que se muestra
+ * en la pantalla "Sugerencias", sin ítems adicionales del pool que no fueron seleccionados.
  *
  * Flujo:
- *   1. Obtener el pool del día vía SugerenciaServicio.obtenerPoolDelDia().
+ *   1. Obtener las líneas del día vía SugerenciaServicio.obtenerLineasSugeridasDelDia().
  *   2. Para cada partido en el pool, buscar el resultado en BD.
  *   3. Si no está en BD y el partido debería haber terminado, consultar la API
  *      y persistir el resultado para no repetir la llamada.
@@ -63,7 +63,7 @@ public class ResolucionServicio {
 
     public List<ResolucionDTO> resolverUltimoBatch() {
 
-        List<SugerenciaLineaDTO> pool = sugerenciaServicio.obtenerPoolDelDia();
+        List<SugerenciaLineaDTO> pool = sugerenciaServicio.obtenerLineasSugeridasDelDia();
         log.info(">>> ResolucionServicio: {} candidatos en el pool del día", pool.size());
         if (pool.isEmpty()) return List.of();
 
@@ -191,6 +191,7 @@ public class ResolucionServicio {
             h.setPartido(dto.getPartido());
             h.setLiga(dto.getLiga());
             h.setHoraPartido(dto.getHoraPartido());
+            h.setFechaPartido(dto.getFechaPartido());
             h.setCategoria(dto.getCategoria());
             h.setMercado(dto.getMercado());
             h.setProbabilidad(dto.getProbabilidad());
@@ -215,6 +216,7 @@ public class ResolucionServicio {
                 .stream()
                 .map(h -> new ResolucionDTO(
                         h.getIdPartido(), h.getPartido(), h.getLiga(), h.getHoraPartido(),
+                        h.getFechaPartido(),
                         h.getCategoria(), h.getMercado(), h.getProbabilidad(),
                         h.getResultadoReal(), h.getGolesLocal(), h.getGolesVisitante(),
                         h.getAcerto(), h.isVerificable(), h.getCuota(), h.getEdge(),
@@ -264,6 +266,7 @@ public class ResolucionServicio {
                 linea.getPartido(),
                 linea.getLiga(),
                 linea.getHoraPartido(),
+                linea.getFechaPartido(),
                 linea.getCategoria(),
                 linea.getMercado(),
                 linea.getProbabilidad(),

@@ -62,43 +62,33 @@ public class TelegramServicio {
     // ── Construcción de mensajes ──────────────────────────────────────────────
 
     private String construirMensajeNuevoPick(PickResponseDTO pick) {
-        String canal     = pick.getCanal() != null ? pick.getCanal() : "FREE";
+        String canal      = pick.getCanal() != null ? pick.getCanal() : "FREE";
         String canalEmoji = emojiCanal(canal);
-        String partido   = nombrePartido(pick);
-        String liga      = pick.getPartido() != null ? pick.getPartido().getLiga() : "";
-        String mercado   = pick.getNombreMercado() != null ? pick.getNombreMercado() : "";
-        String prob      = pick.getProbabilidad() != null
+        String canalLabel = etiquetaCanal(canal);
+        String partido    = nombrePartido(pick);
+        String liga       = pick.getPartido() != null ? pick.getPartido().getLiga() : "";
+        String mercado    = pick.getNombreMercado() != null ? pick.getNombreMercado() : "";
+        String prob       = pick.getProbabilidad() != null
                 ? String.format("%.1f%%", pick.getProbabilidad() * 100) : "—";
-        String cuota     = pick.getValorCuota() != null
-                ? String.format("@%.2f", pick.getValorCuota()) : "—";
-        String edge      = edgeTexto(pick.getEdge());
-        String casa      = (pick.getCasaApuestas() != null && !pick.getCasaApuestas().isBlank()
-                && !"Sin especificar".equals(pick.getCasaApuestas()))
-                ? "\n🏦 <b>Casa:</b> " + pick.getCasaApuestas() : "";
-        String hora      = pick.getPublicadoEn() != null
-                ? pick.getPublicadoEn().format(FMT) : "";
+        String cuota      = pick.getValorCuota() != null
+                ? String.format("%.2f", pick.getValorCuota())
+                          .replaceAll("0+$", "").replaceAll("\\.$", "") : "—";
 
         return String.format("""
-                %s <b>NUEVO PICK — %s</b>
-
+                %s <b>Nuevo Pick - %s:</b>
                 ⚽ <b>%s</b>
-                🏆 %s
+                🏆 <b>%s</b>
 
                 📊 <b>%s</b>
-                🎯 Prob: <b>%s</b>%s
-                💰 Cuota: <b>%s</b>%s
-
-                ⏰ %s
+                🎯 Probabilidad: <b>%s</b>
+                💰 Cuota: <b>%s</b>
                 """,
-                canalEmoji, canal,
+                canalEmoji, canalLabel,
                 partido,
                 liga,
                 mercado,
                 prob,
-                edge,
-                cuota,
-                casa,
-                hora
+                cuota
         );
     }
 
@@ -110,7 +100,8 @@ public class TelegramServicio {
         String partido    = nombrePartido(pick);
         String mercado    = pick.getNombreMercado() != null ? pick.getNombreMercado() : "";
         String cuota      = pick.getValorCuota() != null
-                ? String.format("@%.2f", pick.getValorCuota()) : "—";
+                ? String.format("%.2f", pick.getValorCuota())
+                          .replaceAll("0+$", "").replaceAll("\\.$", "") : "—";
         String hora       = pick.getLiquidadoEn() != null
                 ? pick.getLiquidadoEn().format(FMT) : "";
 
@@ -118,7 +109,7 @@ public class TelegramServicio {
                 %s <b>%s</b> %s
 
                 ⚽ <b>%s</b>
-                📊 %s | <b>%s</b>
+                📊 <b>%s</b> | Cuota: <b>%s</b>
 
                 ✅ Liquidado: %s
                 """,
@@ -186,6 +177,15 @@ public class TelegramServicio {
             case "VIP"     -> "🔵";
             case "PREMIUM" -> "🟡";
             default        -> "⚪";
+        };
+    }
+
+    private String etiquetaCanal(String canal) {
+        return switch (canal.toUpperCase()) {
+            case "FREE"    -> "GRATIS";
+            case "VIP"     -> "VIP";
+            case "PREMIUM" -> "PREMIUM";
+            default        -> canal;
         };
     }
 
