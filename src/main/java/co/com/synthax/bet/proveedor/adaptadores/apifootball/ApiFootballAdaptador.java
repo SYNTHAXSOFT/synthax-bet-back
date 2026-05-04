@@ -350,16 +350,25 @@ public class ApiFootballAdaptador implements ProveedorFutbol, ProveedorCuotas {
         // ha consumido todo lo no-reservado.
         if (!gestorCache.puedeHacerRequestParaCuotas()) return Collections.emptyList();
 
-        log.info(">>> Consultando API-Football: /odds?fixture={}", idPartido);
+        log.info(">>> [CUOTAS] Consultando /odds?fixture={}", idPartido);
 
         try {
             String json = ejecutarRequest("/odds?fixture=" + idPartido);
+
+            // Loguear el JSON crudo (primeros 500 chars) para poder diagnosticar
+            // respuestas inesperadas: errores de la API, campos de error, etc.
+            log.info(">>> [CUOTAS] Respuesta raw fixture {} (primeros 500 chars): {}",
+                    idPartido,
+                    json != null && json.length() > 500 ? json.substring(0, 500) + "..." : json);
 
             ApiFootballRespuesta<Map<String, Object>> respuestaRaw = objectMapper.readValue(
                     json, new TypeReference<>() {});
 
             if (respuestaRaw.getResponse() == null || respuestaRaw.getResponse().isEmpty()) {
-                log.warn(">>> API-Football: sin odds disponibles para fixture {}", idPartido);
+                log.warn(">>> [CUOTAS] API devolvió 0 odds para fixture {} — results={} | " +
+                        "Causas posibles: cuotas no publicadas aún, liga sin cobertura en el plan, " +
+                        "fixture inválido o partido demasiado lejano.",
+                        idPartido, respuestaRaw.getResults());
                 return Collections.emptyList();
             }
 
@@ -370,7 +379,7 @@ public class ApiFootballAdaptador implements ProveedorFutbol, ProveedorCuotas {
                     .flatMap(dto -> ApiFootballMapper.toCuotasExternas(dto, idPartido).stream())
                     .collect(Collectors.toList());
 
-            log.info(">>> {} cuotas obtenidas de la API para fixture {}", cuotas.size(), idPartido);
+            log.info(">>> [CUOTAS] {} cuotas obtenidas para fixture {}", cuotas.size(), idPartido);
 
             // Solo cachear si hay datos reales
             if (!cuotas.isEmpty()) {
@@ -380,7 +389,9 @@ public class ApiFootballAdaptador implements ProveedorFutbol, ProveedorCuotas {
             return cuotas;
 
         } catch (Exception e) {
-            log.error(">>> Error al consultar cuotas del partido {}: {}", idPartido, e.getMessage());
+            // Stack trace completo para distinguir errores HTTP, de parsing o de red
+            log.error(">>> [CUOTAS] Excepción consultando /odds?fixture={} — tipo: {} mensaje: {}",
+                    idPartido, e.getClass().getSimpleName(), e.getMessage(), e);
             return Collections.emptyList();
         }
     }
@@ -685,6 +696,74 @@ public class ApiFootballAdaptador implements ProveedorFutbol, ProveedorCuotas {
             log.error(">>> Error al obtener resultado fixture {}: {}", fixtureId, e.getMessage());
             return Optional.empty();
         }
+    }
+
+    // -------------------------------------------------------
+    // Diagnóstico de fixture individual
+    // -------------------------------------------------------
+
+    /**
+     * Consulta /fixtures?id={idFixture} y devuelve un mapa con los datos clave
+     * del partido tal como los ve la API: equipos, liga, país, fecha y estado.
+     * Consume 1 request del cupo diario.
+     * Usado por CuotaServicio.diagnosticarCuotasRaw() para verificar que el
+     * idPartidoApi almacenado en BD corresponde realmente al partido esperado.
+     */
+    public Map<String, Object> consultarInfoFixture(String idFixture) {
+        Map<String, Object> resultado = new java.util.LinkedHashMap<>();
+
+        if (!gestorCache.puedeHacerRequestParaCuotas()) {
+            resultado.put("error", "Cupo diario agotado — no se pudo consultar el fixture.");
+            return resultado;
+        }
+
+        try {
+            String json = ejecutarRequest("/fixtures?id=" + idFixture);
+
+            // JSON crudo primeros 800 chars para ver la estructura completa
+            resultado.put("rawFixture", json != null && json.length() > 800
+                    ? json.substring(0, 800) + "..." : json);
+
+            ApiFootballRespuesta<Map<String, Object>> respRaw =
+                    objectMapper.readValue(json, new TypeReference<>() {});
+
+            resultado.put("resultsCount", respRaw.getResults());
+
+            if (respRaw.getResponse() == null || respRaw.getResponse().isEmpty()) {
+                resultado.put("encontrado", false);
+                resultado.put("detalle", "La API no encontró ningún fixture con id=" + idFixture);
+                return resultado;
+            }
+
+            List<ApiFootballFixtureDTO> fixtures = objectMapper.convertValue(
+                    respRaw.getResponse(), new TypeReference<>() {});
+
+            ApiFootballFixtureDTO f = fixtures.get(0);
+            resultado.put("encontrado", true);
+            resultado.put("fixtureId",   f.getFixture() != null ? f.getFixture().getId() : null);
+            resultado.put("fecha",       f.getFixture() != null ? f.getFixture().getDate() : null);
+            resultado.put("estado",      f.getFixture() != null && f.getFixture().getStatus() != null
+                    ? f.getFixture().getStatus().getShortStatus() : null);
+            resultado.put("equipoLocal",      f.getTeams() != null && f.getTeams().getHome() != null
+                    ? f.getTeams().getHome().getName() : null);
+            resultado.put("idEquipoLocal",    f.getTeams() != null && f.getTeams().getHome() != null
+                    ? f.getTeams().getHome().getId() : null);
+            resultado.put("equipoVisitante",  f.getTeams() != null && f.getTeams().getAway() != null
+                    ? f.getTeams().getAway().getName() : null);
+            resultado.put("idEquipoVisitante",f.getTeams() != null && f.getTeams().getAway() != null
+                    ? f.getTeams().getAway().getId() : null);
+            resultado.put("liga",        f.getLeague() != null ? f.getLeague().getName() : null);
+            resultado.put("idLiga",      f.getLeague() != null ? f.getLeague().getId() : null);
+            resultado.put("pais",        f.getLeague() != null ? f.getLeague().getCountry() : null);
+            resultado.put("temporada",   f.getLeague() != null ? f.getLeague().getSeason() : null);
+
+        } catch (Exception e) {
+            resultado.put("error", "Excepción al consultar /fixtures?id=" + idFixture
+                    + " — " + e.getClass().getSimpleName() + ": " + e.getMessage());
+            log.error(">>> [DIAG] Error consultando fixture {}: {}", idFixture, e.getMessage(), e);
+        }
+
+        return resultado;
     }
 
     // -------------------------------------------------------

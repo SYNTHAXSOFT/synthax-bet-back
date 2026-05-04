@@ -278,7 +278,8 @@ public class SugerenciaServicio {
         todas.sort(Comparator
                 .comparingDouble((SugerenciaDTO s) ->
                         s.getProbabilidadCombinada() * 0.60 + Math.max(0.0, s.getEdgePromedio()) * 0.40)
-                .reversed());
+                .reversed()
+                .thenComparing(SugerenciaDTO::getDescripcion));
 
         return armarRespuesta(todas);
     }
@@ -636,7 +637,9 @@ public class SugerenciaServicio {
 
         // ── Paso 2: ordenar por score desc ───────────────────────────────────────
         List<SugerenciaLineaDTO> ordenados = mejorPorPartidoCategoria.values().stream()
-                .sorted(Comparator.comparingDouble(this::calcularScore).reversed())
+                .sorted(Comparator.comparingDouble(this::calcularScore).reversed()
+                        .thenComparing(SugerenciaLineaDTO::getIdPartido)
+                        .thenComparing(SugerenciaLineaDTO::getMercado))
                 .collect(Collectors.toList());
 
         // ── Paso 3: aplicar límite por categoría Y por mercado específico ──────────
@@ -927,9 +930,27 @@ public class SugerenciaServicio {
     // Generación de combinaciones
     // ─────────────────────────────────────────────────────────────────────────
 
+    // Criterio para sugerencias automáticas: mismo que el sort final del día
+    // (probabilidad combinada real pesa 60%, edge 40%). Así el pre-filtro y el
+    // sort final siempre coinciden y ningún pick de alta prob queda descartado
+    // en el límite de 10 por tener edge bajo (típico en RESULTADO).
+    private static final Comparator<SugerenciaDTO> ORDEN_AUTOMATICO = Comparator
+            .comparingDouble((SugerenciaDTO s) ->
+                    s.getProbabilidadCombinada() * 0.60 + Math.max(0.0, s.getEdgePromedio()) * 0.40)
+            .reversed()
+            .thenComparing(SugerenciaDTO::getDescripcion);
+
+    // Criterio para sugerencias personalizadas: edge primario (modo exploración),
+    // cuota como desempate y descripción para determinismo total.
+    private static final Comparator<SugerenciaDTO> ORDEN_PERSONALIZADO = Comparator
+            .comparingDouble(SugerenciaDTO::getEdgePromedio).reversed()
+            .thenComparing(Comparator.comparingDouble(SugerenciaDTO::getConfianzaPromedio).reversed())
+            .thenComparing(SugerenciaDTO::getDescripcion);
+
+    // Wrapper para sugerencias automáticas del día.
     private List<SugerenciaDTO> generarCombinaciones(List<SugerenciaLineaDTO> pool,
                                                       int n, double cuotaMinima) {
-        return generarCombinaciones(pool, n, cuotaMinima, false);
+        return generarCombinaciones(pool, n, cuotaMinima, false, ORDEN_AUTOMATICO);
     }
 
     /**
@@ -940,16 +961,16 @@ public class SugerenciaServicio {
     private List<SugerenciaDTO> generarCombinaciones(List<SugerenciaLineaDTO> pool,
                                                       int n, double cuotaMinima,
                                                       boolean permitirMismoPartido) {
-        // Intentar con diversidad de categoría (modo estricto)
+        return generarCombinaciones(pool, n, cuotaMinima, permitirMismoPartido, ORDEN_PERSONALIZADO);
+    }
+
+    private List<SugerenciaDTO> generarCombinaciones(List<SugerenciaLineaDTO> pool,
+                                                      int n, double cuotaMinima,
+                                                      boolean permitirMismoPartido,
+                                                      Comparator<SugerenciaDTO> orden) {
         List<SugerenciaDTO> resultado = new ArrayList<>();
         combinar(pool, n, 0, new ArrayList<>(), resultado, cuotaMinima, true, permitirMismoPartido);
-        // Edge DESC primario, confianza DESC secundaria.
-        // Cada .reversed() se aplica a su propio comparador por separado;
-        // un .reversed() al final de thenComparingDouble() invertiría TODO el comparador compuesto.
-        resultado.sort(Comparator
-                .comparingDouble(SugerenciaDTO::getEdgePromedio).reversed()
-                .thenComparing(
-                        Comparator.comparingDouble(SugerenciaDTO::getConfianzaPromedio).reversed()));
+        resultado.sort(orden);
 
         // Si no se generaron suficientes, relajar diversidad de categoría
         if (resultado.size() < 3 && n >= 2) {
@@ -957,10 +978,7 @@ public class SugerenciaServicio {
                     n, resultado.size());
             resultado.clear();
             combinar(pool, n, 0, new ArrayList<>(), resultado, cuotaMinima, false, permitirMismoPartido);
-            resultado.sort(Comparator
-                    .comparingDouble(SugerenciaDTO::getEdgePromedio).reversed()
-                    .thenComparing(
-                            Comparator.comparingDouble(SugerenciaDTO::getConfianzaPromedio).reversed()));
+            resultado.sort(orden);
         }
 
         return resultado.stream().limit(MAX_SUGERENCIAS_TIPO).collect(Collectors.toList());

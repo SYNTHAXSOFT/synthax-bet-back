@@ -67,7 +67,7 @@ public class TelegramServicio {
         String canalLabel = etiquetaCanal(canal);
         String partido    = nombrePartido(pick);
         String liga       = pick.getPartido() != null ? pick.getPartido().getLiga() : "";
-        String mercado    = pick.getNombreMercado() != null ? pick.getNombreMercado() : "";
+        String mercado    = traducirMercado(pick.getNombreMercado());
         String prob       = pick.getProbabilidad() != null
                 ? String.format("%.1f%%", pick.getProbabilidad() * 100) : "—";
         String cuota      = pick.getValorCuota() != null
@@ -98,7 +98,7 @@ public class TelegramServicio {
         String canal      = pick.getCanal() != null ? pick.getCanal() : "FREE";
         String canalEmoji = emojiCanal(canal);
         String partido    = nombrePartido(pick);
-        String mercado    = pick.getNombreMercado() != null ? pick.getNombreMercado() : "";
+        String mercado    = traducirMercado(pick.getNombreMercado());
         String cuota      = pick.getValorCuota() != null
                 ? String.format("%.2f", pick.getValorCuota())
                           .replaceAll("0+$", "").replaceAll("\\.$", "") : "—";
@@ -186,6 +186,43 @@ public class TelegramServicio {
             case "VIP"     -> "VIP";
             case "PREMIUM" -> "PREMIUM";
             default        -> canal;
+        };
+    }
+
+    /**
+     * Traduce el nombre interno del mercado al español para mostrarlo en Telegram.
+     * Solo afecta la visualización — la lógica de negocio usa siempre el nombre original.
+     */
+    private String traducirMercado(String mercado) {
+        if (mercado == null || mercado.isBlank()) return mercado != null ? mercado : "";
+
+        // ── Coincidencias exactas ─────────────────────────────────────────────
+        return switch (mercado) {
+            case "1X2 - Local"              -> "Victoria Local";
+            case "1X2 - Empate"             -> "Empate";
+            case "1X2 - Visitante"          -> "Victoria Visitante";
+            case "BTTS Sí"                  -> "Ambos Anotan: Sí";
+            case "BTTS No"                  -> "Ambos Anotan: No";
+            case "Clean Sheet Local"        -> "Portería a Cero Local";
+            case "Clean Sheet Visitante"    -> "Portería a Cero Visitante";
+            case "No Clean Sheet Local"     -> "Sin Portería a Cero Local";
+            case "No Clean Sheet Visitante" -> "Sin Portería a Cero Visitante";
+            case "Win to Nil Local"         -> "Ganar sin recibir goles Local";
+            case "Win to Nil Visitante"     -> "Ganar sin recibir goles Visitante";
+            // ── Patrones con Over / Under y Hándicap ─────────────────────────
+            default -> {
+                String m = mercado;
+                // "AH Local/Visitante" → "Hándicap Asiático Local/Visitante"
+                m = m.replace("AH Local",      "Hándicap Asiático Local")
+                     .replace("AH Visitante",  "Hándicap Asiático Visitante");
+                // "Over / Under" en medio de la cadena (ej: "Goles Local Over 0.5")
+                m = m.replace(" Over ",  " Más de ")
+                     .replace(" Under ", " Menos de ");
+                // "Over / Under" al inicio de la cadena (ej: "Over 2.5 Corners")
+                if (m.startsWith("Over "))  m = "Más de "   + m.substring(5);
+                if (m.startsWith("Under ")) m = "Menos de " + m.substring(6);
+                yield m;
+            }
         };
     }
 

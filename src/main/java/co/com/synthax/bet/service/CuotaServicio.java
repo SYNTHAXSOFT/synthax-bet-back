@@ -61,6 +61,13 @@ public class CuotaServicio {
     @Autowired(required = false)
     private ProveedorCuotas proveedorCuotas;
 
+    /**
+     * Adaptador concreto de API-Football — inyectado opcionalmente para diagnóstico.
+     * Solo disponible cuando statbet.proveedor.futbol=api-football.
+     */
+    @Autowired(required = false)
+    private co.com.synthax.bet.proveedor.adaptadores.apifootball.ApiFootballAdaptador apiFootballAdaptador;
+
     // ─────────────────────────────────────────────────────────────────────────
     // Ingesta
     // ─────────────────────────────────────────────────────────────────────────
@@ -360,14 +367,11 @@ public class CuotaServicio {
     );
 
     private List<Partido> obtenerPartidosConAnalisis() {
-        // Usa el mismo criterio que SugerenciaServicio.obtenerAnalisisMasReciente():
-        // toma TODOS los análisis del último batch (ventana de ±30 min alrededor del
-        // timestamp más reciente). Esto evita el problema de corte por fecha cuando:
-        //   - El servidor corre en UTC y el usuario está en UTC-5 (Colombia)
-        //   - El análisis se ejecutó cerca de medianoche
-        //   - El análisis se ejecutó ayer y la ingesta se lanza hoy
-        // Con este enfoque, la ingesta siempre trabaja sobre el mismo pool que
-        // las sugerencias del día, sin importar el timezone del servidor.
+        // Busca el análisis más reciente y verifica que sea de HOY.
+        // Sin esta validación, findMaxCalculadoEn() podría devolver el timestamp de ayer
+        // → la ventana ±30 min encontraría análisis de ayer → se ingestarían cuotas para
+        // partidos de ayer en lugar de los de hoy, reproduciendo el mismo bug de fechas
+        // que afecta a analisis-listar.
         Optional<LocalDateTime> maxFechaOpt = analisisRepositorio.findMaxCalculadoEn();
 
         if (maxFechaOpt.isEmpty()) {
@@ -376,7 +380,15 @@ public class CuotaServicio {
         }
 
         LocalDateTime maxFecha = maxFechaOpt.get();
-        LocalDateTime ini      = maxFecha.minusMinutes(30);
+
+        if (!maxFecha.toLocalDate().equals(LocalDate.now())) {
+            log.warn(">>> [CUOTAS] El análisis más reciente es de {} (no de hoy {}). " +
+                    "Ejecuta primero el análisis del día antes de ingestar cuotas.",
+                    maxFecha.toLocalDate(), LocalDate.now());
+            return List.of();
+        }
+
+        LocalDateTime ini = maxFecha.minusMinutes(30);
 
         List<Analisis> analisisRecientes = analisisRepositorio.findByCalculadoEnBetween(ini, maxFecha);
 
@@ -484,11 +496,13 @@ public class CuotaServicio {
      * Usado por el front-end para poblar el modal de selección de ligas.
      */
     public List<LigaDisponibleDTO> ligasDisponiblesHoy() {
-        // Mismo buffer ±6 h que PartidoServicio.obtenerPartidosPorFecha() y
-        // sincronizarPartidos(), para que el modal muestre exactamente las ligas
-        // que el motor va a encontrar cuando el admin pulse "Ejecutar análisis".
-        LocalDateTime desde = LocalDate.now().atTime(0, 0).minusHours(6);
-        LocalDateTime hasta = LocalDate.now().atTime(23, 59).plusHours(6);
+        // Rango estricto de hoy (00:00–23:59:59), SIN el buffer ±6h.
+        // El motor (ejecutarAnalisisDelDia) filtra los partidos a fechaPartido == hoy,
+        // por lo que el modal debe mostrar exactamente esos mismos partidos.
+        // Con ±6h el modal incluía partidos de ayer tarde/noche → el conteo era incorrecto
+        // y el admin ejecutaba el análisis sobre más partidos de los esperados.
+        LocalDateTime desde = LocalDate.now().atStartOfDay();
+        LocalDateTime hasta = LocalDate.now().atTime(23, 59, 59);
 
         List<Object[]> filas = partidoRepositorio.findLigasAgrupadas(desde, hasta);
 
@@ -535,8 +549,10 @@ public class CuotaServicio {
         List<Partido> partidos = obtenerPartidosConAnalisis();
         resultado.put("paso2_partidosConAnalisis", partidos.size());
 
-        LocalDateTime inicioDia = LocalDate.now().atTime(0, 0).minusHours(6);
-        LocalDateTime finDia    = LocalDate.now().atTime(23, 59).plusHours(6);
+        // Mismo rango estricto que ligasDisponiblesHoy() para que el diagnóstico
+        // muestre la misma cantidad que ve el admin en el modal de selección de ligas.
+        LocalDateTime inicioDia = LocalDate.now().atStartOfDay();
+        LocalDateTime finDia    = LocalDate.now().atTime(23, 59, 59);
         int totalPartidosHoy = (int) partidoRepositorio.findByFechaPartidoBetween(inicioDia, finDia).stream().count();
         resultado.put("paso2_totalPartidosHoy", totalPartidosHoy);
         resultado.put("paso2_detalle", "Solo se ingestarán cuotas para los partidos con análisis, " +
@@ -693,6 +709,30 @@ public class CuotaServicio {
     public Map<String, Object> diagnosticarCuotasRaw(String idApi) {
         Map<String, Object> r = new java.util.LinkedHashMap<>();
         r.put("idApiConsultado", idApi);
+
+        // ── Paso 0: qué hay en nuestra BD para este idPartidoApi ────────────
+        partidoRepositorio.findByIdPartidoApi(idApi).ifPresentOrElse(
+                p -> r.put("paso0_infoBD", Map.of(
+                        "encontradoEnBD",   true,
+                        "idInterno",        p.getId(),
+                        "equipoLocal",      p.getEquipoLocal(),
+                        "equipoVisitante",  p.getEquipoVisitante(),
+                        "liga",             p.getLiga() != null ? p.getLiga() : "null",
+                        "fechaPartido",     p.getFechaPartido() != null ? p.getFechaPartido().toString() : "null",
+                        "estado",           p.getEstado() != null ? p.getEstado().name() : "null"
+                )),
+                () -> r.put("paso0_infoBD", Map.of(
+                        "encontradoEnBD", false,
+                        "detalle", "Ningún partido en BD tiene idPartidoApi=" + idApi
+                ))
+        );
+
+        // ── Paso 1: qué devuelve la API en /fixtures?id= ─────────────────────
+        if (apiFootballAdaptador != null) {
+            r.put("paso1_infoAPI_fixture", apiFootballAdaptador.consultarInfoFixture(idApi));
+        } else {
+            r.put("paso1_infoAPI_fixture", "ApiFootballAdaptador no disponible (proveedor distinto)");
+        }
 
         if (proveedorCuotas == null) {
             r.put("error", "ProveedorCuotas no disponible. Verifica la configuración del proveedor.");

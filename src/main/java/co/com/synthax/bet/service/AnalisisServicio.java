@@ -36,18 +36,14 @@ public class AnalisisServicio {
      * La ejecución siempre debe ser explícita vía POST /ejecutar con ligas seleccionadas.
      */
     public List<Analisis> obtenerAnalisisDeHoy() {
-        List<Partido> partidos = partidoServicio.obtenerPartidosDeHoy();
+        // Filtra por calculadoEn (timestamp exacto del cálculo), NO por partido.
+        // Filtrar por partido usaba el pool ±6h de obtenerPartidosDeHoy() que incluye
+        // partidos nocturnos de ayer, haciendo que findByPartidoIdIn devolviera los
+        // análisis de ayer → el frontend nunca veía lista vacía → modal no se abría.
+        java.time.LocalDateTime inicioDia = java.time.LocalDate.now().atStartOfDay();
+        java.time.LocalDateTime finDia    = java.time.LocalDate.now().atTime(23, 59, 59);
 
-        if (partidos.isEmpty()) {
-            log.info(">>> Sin partidos hoy en BD — retornando lista vacía");
-            return List.of();
-        }
-
-        List<Long> idsPartidosHoy = partidos.stream()
-                .map(Partido::getId)
-                .toList();
-
-        List<Analisis> existentes = analisisRepositorio.findByPartidoIdIn(idsPartidosHoy);
+        List<Analisis> existentes = analisisRepositorio.findByCalculadoEnBetween(inicioDia, finDia);
 
         if (!existentes.isEmpty()) {
             log.info(">>> {} análisis ya calculados para hoy, devolviendo desde BD", existentes.size());
@@ -94,12 +90,28 @@ public class AnalisisServicio {
      *                MAX_PARTIDOS_A_ANALIZAR partidos del día sin filtro de liga.
      */
     public List<Analisis> ejecutarAnalisisDelDia(List<String> ligaIds) {
-        List<Partido> todosHoy = partidoServicio.obtenerPartidosDeHoy();
+        List<Partido> todosHoyRaw = partidoServicio.obtenerPartidosDeHoy();
 
-        if (todosHoy.isEmpty()) {
+        if (todosHoyRaw.isEmpty()) {
             log.warn(">>> Sin partidos hoy para analizar");
             return List.of();
         }
+
+        // El pool de obtenerPartidosDeHoy() usa ±6h de buffer y puede incluir partidos
+        // nocturnos de ayer (18:00–23:59). Se filtra a solo los partidos cuya fecha real
+        // sea hoy, para evitar re-analizar ayer y generar análisis duplicados o mezclados.
+        java.time.LocalDate hoy = java.time.LocalDate.now();
+        List<Partido> todosHoy = todosHoyRaw.stream()
+                .filter(p -> p.getFechaPartido() != null && p.getFechaPartido().toLocalDate().equals(hoy))
+                .collect(java.util.stream.Collectors.toList());
+
+        if (todosHoy.isEmpty()) {
+            log.warn(">>> Sin partidos con fechaPartido == hoy ({}) — todos los encontrados son de otro día", hoy);
+            return List.of();
+        }
+
+        log.info(">>> {} partidos totales en rango ±6h → {} con fechaPartido == hoy",
+                todosHoyRaw.size(), todosHoy.size());
 
         List<Partido> partidos;
 
