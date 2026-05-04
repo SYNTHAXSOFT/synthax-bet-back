@@ -258,26 +258,17 @@ public class SugerenciaServicio {
         todas.addAll(dobles);
         todas.addAll(triples);
 
-        // Ordenar por probabilidad REAL de ganar la apuesta completa (60%) + edge (40%).
+        // Ordenar por probabilidad REAL de ganar la apuesta completa (descendente).
         //
-        // Se usa getProbabilidad() — la probabilidad COMBINADA real — en lugar de
-        // getConfianzaPromedio() — el promedio de las probabilidades individuales.
+        // Se usa getProbabilidadCombinada() — producto real de las probabilidades individuales —
+        // no getConfianzaPromedio() (promedio), que infla artificialmente los triples:
+        //   Triple [85% + 84% + 60%] → confianza "76.4%" pero prob real = 42.9%
         //
-        // El problema con el promedio: un triple [85% + 84% + 60%] muestra "76.4% confianza"
-        // pero la probabilidad real de que las 3 patas ganen es solo 42.9%.
-        // Ordenar por promedio inflaba artificialmente los triples y hacía que aparecieran
-        // como "la apuesta más probable" cuando en realidad son las menos probables.
-        //
-        // Con probabilidad combinada:
-        //   Simple  85%        → score 0.510 + edge_bonus → gana correctamente
-        //   Doble   51% (real) → score 0.306 + edge_bonus → por debajo del simple
-        //   Triple  43% (real) → score 0.258 + edge_bonus → correctamente el más bajo
-        //
-        // armarRespuesta ya separa por tipo (simples/dobles/triples) antes de seleccionar,
-        // así que el sort solo decide cuál es el MEJOR dentro de cada tipo.
+        // armarRespuesta separa por tipo antes de seleccionar, así que este sort
+        // decide cuál es el MEJOR dentro de cada tipo (simples vs dobles vs triples).
+        // El edge es informativo; no altera este ranking.
         todas.sort(Comparator
-                .comparingDouble((SugerenciaDTO s) ->
-                        s.getProbabilidadCombinada() * 0.60 + Math.max(0.0, s.getEdgePromedio()) * 0.40)
+                .comparingDouble(SugerenciaDTO::getProbabilidadCombinada)
                 .reversed()
                 .thenComparing(SugerenciaDTO::getDescripcion));
 
@@ -479,35 +470,55 @@ public class SugerenciaServicio {
      * @param esPartidoFiltrado true si el pool es del partido de un equipo buscado
      *                          explícitamente (simples personalizados — sin límite estricto)
      */
-    /** Wrapper para sugerencias automáticas: aplica EDGE_MINIMO estándar. */
+
+    /**
+     * Wrapper para sugerencias automáticas del día.
+     * Criterio: probabilidad pura. El edge NO es filtro de entrada, solo información.
+     * Se mantienen los filtros de calidad de dato (árbitro, prob por categoría).
+     */
     private List<SugerenciaLineaDTO> construirPool(List<Analisis> aptos,
                                                     Map<Long, List<Cuota>> cuotasMap,
                                                     boolean esPartidoFiltrado) {
-        return construirPool(aptos, cuotasMap, esPartidoFiltrado, EDGE_MINIMO);
+        return construirPool(aptos, cuotasMap, esPartidoFiltrado, 0.0, true);
     }
 
     /**
-     * Versión con edge mínimo configurable. Usada por sugerencias automáticas (edgeMin=EDGE_MINIMO)
-     * y por personalizar sugerencias (edgeMin=0.0 para mostrar todos con cuota real).
+     * Wrapper para sugerencias personalizadas.
+     * edgeMinimo=0.0 → sin filtro de edge (exploración libre del usuario).
+     * modoAutomatico=false → sin filtros de calidad automáticos.
      */
     private List<SugerenciaLineaDTO> construirPool(List<Analisis> aptos,
                                                     Map<Long, List<Cuota>> cuotasMap,
                                                     boolean esPartidoFiltrado,
                                                     double edgeMinimo) {
+        return construirPool(aptos, cuotasMap, esPartidoFiltrado, edgeMinimo, false);
+    }
+
+    /**
+     * Implementación central del pool de candidatos.
+     *
+     * modoAutomatico=true  → aplica umbrales de probabilidad por categoría (TARJETAS ≥65%,
+     *                        CORNERS ≥62%) y filtro de árbitro calificado para TARJETAS.
+     *                        El edge es informativo, nunca es puerta de entrada.
+     * modoAutomatico=false → sin filtros extra; el usuario decide en personalizado.
+     * edgeMinimo > 0       → filtro de edge adicional (reservado para futuras variantes,
+     *                        actualmente siempre 0.0 en ambos modos).
+     */
+    private List<SugerenciaLineaDTO> construirPool(List<Analisis> aptos,
+                                                    Map<Long, List<Cuota>> cuotasMap,
+                                                    boolean esPartidoFiltrado,
+                                                    double edgeMinimo,
+                                                    boolean modoAutomatico) {
 
         // ── Paso 0: precarga de árbitros calificados para TARJETAS ───────────────
-        // Solo en modo automático (edgeMinimo > 0). En modo personalizado no se filtra
-        // porque el usuario ya decidió incluir la categoría.
+        // Solo en modo automático. En personalizado el usuario decide qué explorar.
         //
-        // Se consultan en lote los árbitros únicos de todos los análisis de TARJETAS
-        // para evitar N+1 dentro del loop principal. El resultado se almacena en un
-        // mapa nombre_lower → calificado (boolean) para lookups O(1).
-        //
+        // Se consultan en lote para evitar N+1. El resultado es un mapa
+        // nombre_lower → calificado (boolean) para lookups O(1).
         // Un árbitro está "calificado" si tiene ≥ ARBITRO_PARTIDOS_MINIMOS_TARJETAS
-        // partidos analizados en la BD, lo que garantiza que su promedio de tarjetas
-        // tiene suficiente respaldo estadístico.
+        // partidos, garantizando respaldo estadístico suficiente.
         Map<String, Boolean> arbitroCalificado = new HashMap<>();
-        if (edgeMinimo > 0.0) {
+        if (modoAutomatico) {
             aptos.stream()
                     .filter(a -> a.getCategoriaMercado() == CategoriaAnalisis.TARJETAS
                             && a.getPartido() != null
@@ -539,25 +550,20 @@ public class SugerenciaServicio {
             // Sin cuota real no hay edge calculable ni referencia fiable de precio.
             if (!Boolean.TRUE.equals(linea.getCuotaReal())) continue;
 
-            // En modo automático aplica umbrales diferenciados por categoría:
-            //   TARJETAS  → edge ≥ 8%  Y  prob ≥ 65%  (datos frecuentemente incompletos)
-            //   CORNERS   → edge ≥ 2%  Y  prob ≥ 62%
-            //   RESULTADO → edge ≥ 2%  (favoritos claros tienen edge bajo por diseño del mercado)
-            //   Resto     → edge ≥ 5%
-            // En modo personalizado (edgeMinimo=0.0) no se aplica ningún umbral.
-            if (edgeMinimo > 0.0) {
-                double edgeMinimoAplicable;
+            // ── Filtros de calidad de dato — solo en modo automático ─────────────
+            // El edge NO es criterio de entrada en automático: el core es probabilidad pura.
+            // Sí se aplican filtros de calidad de dato que protegen contra predicciones
+            // estadísticamente poco confiables (árbitro sin datos, prob baja por categoría,
+            // corners under con cuota irrisoria que no justifica el riesgo).
+            // En personalizado el usuario decide libremente qué explorar.
+            if (modoAutomatico) {
+                CategoriaAnalisis catA = a.getCategoriaMercado();
                 double probMinimaCategoria;
 
-                if (a.getCategoriaMercado() == CategoriaAnalisis.TARJETAS) {
-                    edgeMinimoAplicable  = EDGE_MINIMO_TARJETAS;
-                    probMinimaCategoria  = PROB_MINIMA_TARJETAS;
-
-                    // Mejora 1: excluir tarjetas cuyo árbitro no está calificado.
-                    // Sin datos del árbitro (o con pocos partidos), la predicción de
-                    // tarjetas cae al fallback de estadísticas de equipo, que es
-                    // insuficiente. El diagnóstico 2026-04-23 mostró 0% win rate en
-                    // tarjetas con árbitro sin datos en BD.
+                if (catA == CategoriaAnalisis.TARJETAS) {
+                    probMinimaCategoria = PROB_MINIMA_TARJETAS;
+                    // Árbitro sin datos suficientes → predicción de tarjetas no confiable.
+                    // Diagnóstico 2026-04-23: 0% win rate con árbitro sin datos en BD.
                     String nombreArbitro = (a.getPartido() != null)
                             ? a.getPartido().getArbitro() : null;
                     if (nombreArbitro == null || nombreArbitro.isBlank()
@@ -568,46 +574,50 @@ public class SugerenciaServicio {
                                 a.getPartido() != null ? a.getPartido().getEquipoVisitante() : "?");
                         continue;
                     }
-                } else if (a.getCategoriaMercado() == CategoriaAnalisis.CORNERS
-                        || a.getCategoriaMercado() == CategoriaAnalisis.CORNERS_EQUIPO) {
-                    edgeMinimoAplicable  = EDGE_MINIMO_CORNERS;
-                    probMinimaCategoria  = PROB_MINIMA_CORNERS;
-                } else if (a.getCategoriaMercado() == CategoriaAnalisis.RESULTADO) {
-                    // Edge negativo permitido: en 1X2/Doble Oportunidad el bookmaker es muy
-                    // eficiente y el motor casi nunca lo supera. Si exigiéramos edge ≥ 0,
-                    // nunca aparecerían victorias de favoritos. Con -5% el motor puede estar
-                    // hasta 5 puntos por debajo del bookmaker y aun así el pick se muestra.
-                    edgeMinimoAplicable  = EDGE_MINIMO_RESULTADO;   // -0.05
-                    probMinimaCategoria  = PROB_MINIMA_RESULTADO;   // 0.55
+                } else if (catA == CategoriaAnalisis.CORNERS
+                        || catA == CategoriaAnalisis.CORNERS_EQUIPO) {
+                    probMinimaCategoria = PROB_MINIMA_CORNERS;
+                } else if (catA == CategoriaAnalisis.RESULTADO) {
+                    probMinimaCategoria = PROB_MINIMA_RESULTADO;
                 } else {
-                    edgeMinimoAplicable  = edgeMinimo;
-                    probMinimaCategoria  = PROB_MINIMA_SELECCION;
+                    probMinimaCategoria = PROB_MINIMA_SELECCION;
                 }
 
                 if (a.getProbabilidad().doubleValue() < probMinimaCategoria) continue;
+
+                // Corners "Menos de" con cuota @1.15-1.24: pago casi nulo, ocupan el slot
+                // CORNERS_UNDER bloqueando picks "Más de" con mejor cuota y valor real.
+                if ((catA == CategoriaAnalisis.CORNERS || catA == CategoriaAnalisis.CORNERS_EQUIPO)
+                        && !esOver(a.getNombreMercado())
+                        && linea.getCuota() < CUOTA_MIN_UNDER_CORNERS) continue;
+            }
+
+            // ── Filtro de edge (reservado para futuras variantes de personalización) ──
+            // Actualmente edgeMinimo = 0.0 en ambos modos: este bloque nunca se ejecuta.
+            // Se conserva como punto de extensión si en el futuro se quiere ofrecer
+            // una variante de personalizado con umbral de edge configurable.
+            if (edgeMinimo > 0.0) {
+                double edgeMinimoAplicable;
+                CategoriaAnalisis catE = a.getCategoriaMercado();
+                if (catE == CategoriaAnalisis.TARJETAS) {
+                    edgeMinimoAplicable = EDGE_MINIMO_TARJETAS;
+                } else if (catE == CategoriaAnalisis.CORNERS || catE == CategoriaAnalisis.CORNERS_EQUIPO) {
+                    edgeMinimoAplicable = EDGE_MINIMO_CORNERS;
+                } else if (catE == CategoriaAnalisis.RESULTADO) {
+                    edgeMinimoAplicable = EDGE_MINIMO_RESULTADO;
+                } else {
+                    edgeMinimoAplicable = edgeMinimo;
+                }
                 if (linea.getEdge() < edgeMinimoAplicable) continue;
             }
 
-            // Cuota mínima por pata real
+            // ── Cuota mínima por pata (siempre, ambos modos) ─────────────────────
             if (linea.getCuota() < CUOTA_MIN_PATA_REAL) continue;
 
-            // Cuota mínima específica para RESULTADO: se exige @1.30 mínimo.
-            // Picks de resultado a @1.10–1.29 no justifican el riesgo residual
-            // (un empate inesperado los echa a perder pagando muy poco si ganan).
+            // Resultado @1.10-1.29: pago tan bajo que no justifica el riesgo residual
+            // (un empate inesperado destruye la apuesta pagando casi nada si gana).
             if (a.getCategoriaMercado() == CategoriaAnalisis.RESULTADO
                     && linea.getCuota() < CUOTA_MIN_PATA_RESULTADO) continue;
-
-            // Cuota mínima específica para "Menos de" corners: se exige @1.25.
-            // Con el modelo actual (datos de 10 fixtures, λ ligeramente conservador),
-            // los Unders con cuota @1.15–1.24 tienen edge ~1–3% que es puro ruido.
-            // Filtrarlos obliga al slot CORNERS_UNDER a usar solo picks más rentables
-            // y libera el pool para que aparezcan picks "Más de" con mejor cuota.
-            // Este filtro NO aplica en modo personalizado (edgeMinimo=0.0).
-            if (edgeMinimo > 0.0
-                    && (a.getCategoriaMercado() == CategoriaAnalisis.CORNERS
-                        || a.getCategoriaMercado() == CategoriaAnalisis.CORNERS_EQUIPO)
-                    && !esOver(a.getNombreMercado())
-                    && linea.getCuota() < CUOTA_MIN_UNDER_CORNERS) continue;
 
             // Clave: (partido, categoría) — conservar el mejor de cada par.
             // Para CORNERS y GOLES se separa OVER vs UNDER: así el mejor Over y el
@@ -770,17 +780,14 @@ public class SugerenciaServicio {
     }
 
     /**
-     * Score de una pata = prob × (1 + max(0, edge) × 1.5)
+     * Score de una pata = probabilidad del motor.
      *
-     * Antes el multiplicador era ×2, lo que hacía que un 57% con 8% edge superara
-     * a un 80% con 2% edge. Con ×1.5 la probabilidad pesa más:
-     *   - 80% + 2% edge → 0.80 × 1.03 = 0.824
-     *   - 57% + 8% edge → 0.57 × 1.12 = 0.638
-     * Un pick más probable siempre gana si la diferencia de probabilidad es grande.
+     * El core de las sugerencias automáticas es probabilidad pura.
+     * El edge es información complementaria visible en la UI (sección "Picks de Valor"),
+     * pero no altera el ranking interno del pool ni la selección de sugerencias.
      */
     private double calcularScore(SugerenciaLineaDTO linea) {
-        double edge = linea.getEdge() != null ? linea.getEdge() : 0.0;
-        return linea.getProbabilidad() * (1.0 + Math.max(0.0, edge) * 1.5);
+        return linea.getProbabilidad();
     }
 
     private static final DateTimeFormatter HORA_COL  = DateTimeFormatter.ofPattern("HH:mm");
@@ -930,13 +937,11 @@ public class SugerenciaServicio {
     // Generación de combinaciones
     // ─────────────────────────────────────────────────────────────────────────
 
-    // Criterio para sugerencias automáticas: mismo que el sort final del día
-    // (probabilidad combinada real pesa 60%, edge 40%). Así el pre-filtro y el
-    // sort final siempre coinciden y ningún pick de alta prob queda descartado
-    // en el límite de 10 por tener edge bajo (típico en RESULTADO).
+    // Criterio para sugerencias automáticas: probabilidad combinada pura (descendente).
+    // El edge no interviene en el orden de las sugerencias automáticas.
+    // Tiebreaker por descripción para garantizar orden determinista entre sugerencias iguales.
     private static final Comparator<SugerenciaDTO> ORDEN_AUTOMATICO = Comparator
-            .comparingDouble((SugerenciaDTO s) ->
-                    s.getProbabilidadCombinada() * 0.60 + Math.max(0.0, s.getEdgePromedio()) * 0.40)
+            .comparingDouble(SugerenciaDTO::getProbabilidadCombinada)
             .reversed()
             .thenComparing(SugerenciaDTO::getDescripcion);
 
@@ -1193,6 +1198,57 @@ public class SugerenciaServicio {
      * Usado por ResolucionServicio para que la tabla de "Resolver análisis"
      * muestre exactamente las mismas apuestas que la pantalla "Sugerencias".
      */
+    /**
+     * Devuelve los picks del día ordenados por edge descendente — "Picks de Valor".
+     *
+     * Son los picks donde el motor detecta mayor ventaja sobre la cuota del bookmaker,
+     * independientemente de si aparecieron o no en las sugerencias automáticas.
+     * Se usan para una sección informativa separada: el edge no altera las sugerencias
+     * principales (que se ordenan por probabilidad pura).
+     *
+     * Solo se incluyen picks con edge > 0 (ventaja real sobre la casa).
+     * El pool es el mismo que generarSugerenciasDelDia(): mismos filtros de calidad
+     * de dato, mismas cuotas reales, mismo modo automático.
+     */
+    public List<SugerenciaLineaDTO> obtenerPicksDeValor() {
+        List<Analisis> analisisRecientes = obtenerAnalisisMasReciente();
+        if (analisisRecientes.isEmpty()) return List.of();
+
+        List<Analisis> aptos = analisisRecientes.stream()
+                .filter(a -> CATEGORIAS_APOSTABLES.contains(a.getCategoriaMercado()))
+                .filter(a -> a.getProbabilidad() != null)
+                .filter(a -> {
+                    double prob = a.getProbabilidad().doubleValue();
+                    if (a.getCategoriaMercado() == CategoriaAnalisis.RESULTADO)
+                        return prob >= PROB_MINIMA_RESULTADO;
+                    return prob >= PROB_MINIMA_SELECCION;
+                })
+                .toList();
+
+        if (aptos.isEmpty()) return List.of();
+
+        List<Long> idsPartidos = aptos.stream()
+                .map(a -> a.getPartido().getId())
+                .distinct()
+                .collect(Collectors.toList());
+        Map<Long, List<Cuota>> cuotasMap = cuotaServicio.obtenerCuotasPorPartidos(idsPartidos);
+
+        // Mismo pool que las sugerencias del día (modoAutomatico=true vía wrapper 3-arg).
+        List<SugerenciaLineaDTO> pool = construirPool(aptos, cuotasMap, false);
+
+        List<SugerenciaLineaDTO> picksDeValor = pool.stream()
+                .filter(l -> l.getEdge() != null && l.getEdge() > 0.0)
+                .sorted(Comparator.comparingDouble(SugerenciaLineaDTO::getEdge).reversed()
+                        .thenComparing(SugerenciaLineaDTO::getIdPartido)
+                        .thenComparing(SugerenciaLineaDTO::getMercado))
+                .limit(5)
+                .collect(Collectors.toList());
+
+        log.info(">>> [PICKS-VALOR] {} picks con edge > 0 del pool de {} candidatos",
+                picksDeValor.size(), pool.size());
+        return picksDeValor;
+    }
+
     public List<SugerenciaLineaDTO> obtenerLineasSugeridasDelDia() {
         List<SugerenciaDTO> sugerencias = generarSugerenciasDelDia();
         if (sugerencias.isEmpty()) return List.of();

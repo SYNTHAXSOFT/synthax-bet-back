@@ -208,6 +208,43 @@ public class NormalizadorMercado {
     }
 
     /**
+     * Detecta si el texto de casaNorm, a partir de posAfter, empieza con un separador
+     * de línea partida (quarter-ball o split-line). Salta espacios intermedios.
+     *
+     * Variantes reconocidas:
+     *   "over 5.5/6"     → '/' → split-line
+     *   "over 5.5 / 6"   → ' ' + '/' → split-line
+     *   "over 5.5-6"     → '-' + dígito → split-line
+     *   "over 5.5 - 6"   → ' ' + '-' + ' ' + dígito → split-line
+     *   "over 5.5"       → fin de cadena → NO es split-line
+     *   "+0.5/1.0"       → '/' → split-line (handicap asiático quarter-ball)
+     *
+     * Solo se considera split-line si, tras saltar espacios:
+     *   • el siguiente carácter es '/'  (siempre indica línea partida), O
+     *   • el siguiente carácter es '-'  Y hay un dígito después (puede haber más espacios).
+     * Esto evita falsos positivos con texto arbitrario que no sea un número separador.
+     */
+    private boolean esSeparadorLineaPartida(String casaNorm, int posAfter) {
+        // Saltar espacios en blanco
+        while (posAfter < casaNorm.length() && casaNorm.charAt(posAfter) == ' ') posAfter++;
+        if (posAfter >= casaNorm.length()) return false;
+
+        char c = casaNorm.charAt(posAfter);
+
+        // '/' siempre es separador de quarter-ball/split-line
+        if (c == '/') return true;
+
+        // '-' solo es separador si va seguido (posiblemente con espacios) de un dígito
+        if (c == '-') {
+            int posDigit = posAfter + 1;
+            while (posDigit < casaNorm.length() && casaNorm.charAt(posDigit) == ' ') posDigit++;
+            return posDigit < casaNorm.length() && Character.isDigit(casaNorm.charAt(posDigit));
+        }
+
+        return false;
+    }
+
+    /**
      * Verifica si un nombre de cuota de la casa coincide con el mercado del motor.
      *
      * Estrategia en 5 niveles (reducida desde 7):
@@ -259,26 +296,42 @@ public class NormalizadorMercado {
         //    → matchearía "AH Visitante +0.5" siendo un mercado distinto (cuotas ~4.5).
         //    Se excluyen todos los mercados que contienen "/" en la parte numérica.
         if (casaNorm.contains(esperado)) {
-            // Si el nombre de la casa tiene "/" justo después del valor esperado
-            // → es un quarter-ball handicap, NO es el mercado entero que buscamos
+            // Guardia split-line: si tras el nombre esperado viene un separador de línea
+            // partida (/ o -, con o sin espacios), el mercado de la casa NO es el mismo
+            // que buscamos sino una variante quarter-ball/split-line con cuota distinta.
+            // Ejemplos bloqueados:
+            //   "asian handicap - away +0.5/1.0"   → quarter-ball handicap
+            //   "asian corners - over 5.5/6"        → split-line con barra
+            //   "asian corners - over 5.5-6"        → split-line con guion
+            //   "asian corners - over 5.5 / 6"      → split-line con espacios + barra
+            //   "asian corners - over 5.5 - 6"      → split-line con espacios + guion
             int idx = casaNorm.indexOf(esperado);
             int siguiente = idx + esperado.length();
-            boolean esQuarterBall = siguiente < casaNorm.length()
-                    && casaNorm.charAt(siguiente) == '/';
-            if (!esQuarterBall) return true;
+            if (!esSeparadorLineaPartida(casaNorm, siguiente)) return true;
         }
 
-        // 3. Semántica para CORNERS:
+        // 3. Semántica para CORNERS TOTALES del partido:
         //    "Over 9.5 Corners" coincide con "Asian Corners - Over 9.5",
         //    "Corner Over/Under Lines - Over 9.5", etc.
         //    Se exige "dir + espacio + umbral" para no confundir Over con Under.
         //
-        //    GUARDIA TEAM CORNERS: mercados como "Team Corners" o "Team's Corners"
-        //    son mercados de corners POR EQUIPO (cuántos hace el local / visitante),
-        //    NO el total de corners del partido. Sus cuotas son completamente distintas
-        //    (Over 4.5 team corners ≠ Over 4.5 corners totales) y generarían edges falsos.
-        //    Se excluyen explícitamente para que no interfieran con el total de corners.
-        if (motorNorm.contains("corners")) {
+        //    GUARDIA CORNERS POR EQUIPO (lado casa): varios formatos de API-Football
+        //    representan corners POR EQUIPO con cuotas completamente distintas al total:
+        //      "Team Corners - Home Over 3.5"         → contiene "team corner"
+        //      "Team's Corners - Away Under 4.5"      → contiene "team's corner"
+        //      "Home Corners Over/Under - Over 5.5"   → contiene "home corner"  ← API real
+        //      "Away Corners Over/Under - Over 5.5"   → contiene "away corner"  ← API real
+        //    Se excluyen todos para que no interfieran con el total de corners del partido.
+        //
+        //    GUARDIA TEAM CORNERS (lado motor): "Local Más de X.5 Corners" y
+        //    "Visitante Más de X.5 Corners" empiezan por "local "/"visitante ", NO por
+        //    "over"/"más de". Sin esta guarda, la detección de dirección defaultea a
+        //    "under" y el mercado queda cruzado con "Asian Corners - Under X.5"
+        //    (mercado opuesto y de precio completamente distinto). Estos mercados de
+        //    equipo se manejan correctamente en el Level 3b siguiente.
+        if (motorNorm.contains("corners")
+                && !motorNorm.startsWith("local ")
+                && !motorNorm.startsWith("visitante ")) {
             String umbral = extraerUmbral(motorNorm);
             String dir    = (motorNorm.startsWith("over") || motorNorm.startsWith("más de"))
                             ? "over" : "under";
@@ -286,8 +339,18 @@ public class NormalizadorMercado {
                     && casaNorm.contains("corner")
                     && !casaNorm.contains("team corner")
                     && !casaNorm.contains("team's corner")
-                    && casaNorm.contains(dir + " " + umbral)) {
-                return true;
+                    && !casaNorm.contains("home corner")
+                    && !casaNorm.contains("away corner")) {
+
+                // Buscar "over X.5" / "under X.5" verificando que NO sea línea partida.
+                // Usa el mismo helper robusto que Level 2: salta espacios y reconoce
+                // "over 5.5/6", "over 5.5-6", "over 5.5 / 6", "over 5.5 - 6".
+                String esperadoDir = dir + " " + umbral;
+                int idxDir = casaNorm.indexOf(esperadoDir);
+                if (idxDir != -1) {
+                    int siguienteDir = idxDir + esperadoDir.length();
+                    if (!esSeparadorLineaPartida(casaNorm, siguienteDir)) return true;
+                }
             }
         }
 

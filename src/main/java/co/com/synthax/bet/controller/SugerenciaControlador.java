@@ -2,6 +2,7 @@ package co.com.synthax.bet.controller;
 
 import co.com.synthax.bet.dto.FiltroSugerenciaDTO;
 import co.com.synthax.bet.dto.SugerenciaDTO;
+import co.com.synthax.bet.dto.SugerenciaLineaDTO;
 import co.com.synthax.bet.service.SugerenciaServicio;
 import lombok.RequiredArgsConstructor;
 import lombok.extern.slf4j.Slf4j;
@@ -41,6 +42,19 @@ public class SugerenciaControlador {
             @RequestBody FiltroSugerenciaDTO filtro) {
         log.info(">>> POST /sugerencias/personalizada — filtro: {}", filtro);
         return ResponseEntity.ok(sugerenciaServicio.generarPersonalizada(filtro));
+    }
+
+    /**
+     * GET /sugerencias/valor
+     * Devuelve los picks del día con mayor edge sobre la casa de apuestas (top 5).
+     * Son picks donde el motor detecta ventaja real sobre la cuota del bookmaker.
+     * Esta sección es informativa y NO altera las sugerencias automáticas,
+     * que se seleccionan exclusivamente por probabilidad.
+     */
+    @GetMapping("/valor")
+    public ResponseEntity<List<SugerenciaLineaDTO>> picksDeValor() {
+        log.info(">>> GET /sugerencias/valor");
+        return ResponseEntity.ok(sugerenciaServicio.obtenerPicksDeValor());
     }
 
     /**
