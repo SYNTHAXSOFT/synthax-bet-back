@@ -495,6 +495,12 @@ public class MotorAnalisis {
             entity.setPromedioGolesContraReciente(
                     BigDecimal.valueOf(ext.getPromedioGolesContraReciente()).setScale(2, RoundingMode.HALF_UP));
 
+        // Partidos analizados — muestra de fiabilidad estadística.
+        // Guardado para que el pool de sugerencias pueda excluir equipos
+        // con menos de 8 partidos y evitar predicciones de Poisson poco confiables.
+        if (ext.getPartidosAnalizados() != null)
+            entity.setPartidosAnalizados(ext.getPartidosAnalizados());
+
         return estadisticaEquipoRepositorio.save(entity);
     }
 

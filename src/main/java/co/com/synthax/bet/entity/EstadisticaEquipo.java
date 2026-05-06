@@ -106,6 +106,12 @@ public class EstadisticaEquipo {
     @Column(name = "promedio_goles_contra_reciente", precision = 5, scale = 2)
     private BigDecimal promedioGolesContraReciente;
 
+    // Cantidad de partidos usados para calcular las estadísticas.
+    // Guardado desde el proveedor externo. Permite al pool de sugerencias
+    // filtrar equipos con muestra insuficiente (< 8 partidos).
+    @Column(name = "partidos_analizados")
+    private Integer partidosAnalizados;
+
     @Column(name = "ultima_actualizacion")
     private LocalDateTime ultimaActualizacion;
 
