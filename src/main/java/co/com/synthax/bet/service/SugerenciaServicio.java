@@ -533,6 +533,16 @@ public class SugerenciaServicio {
         // él evalúe el valor de cada pick.
         List<SugerenciaLineaDTO> pool = construirPool(aptosEquipo, cuotasMap, hayFiltroEquipo, 0.0);
 
+        // ── Filtro de cuota mínima por pata (solicitado por el usuario) ───────────
+        if (filtro.getCuotaMinimaPorPata() != null && filtro.getCuotaMinimaPorPata() > 0) {
+            final double cuotaMinPata = filtro.getCuotaMinimaPorPata();
+            pool = pool.stream()
+                    .filter(p -> p.getCuota() != null && p.getCuota() >= cuotaMinPata)
+                    .collect(Collectors.toList());
+            log.info(">>> [PERSONALIZADA] pool tras filtro cuotaMinimaPorPata={}: {} candidatos",
+                    cuotaMinPata, pool.size());
+        }
+
         log.info(">>> [PERSONALIZADA] pool: {} candidatos | hayFiltroEquipo={} | permitirMismoPartido={}",
                 pool.size(), hayFiltroEquipo, permitirMismoPartido);
         if (pool.isEmpty()) return List.of();

@@ -39,6 +39,13 @@ public class FiltroSugerenciaDTO {
     private String tipoApuesta;
 
     /**
+     * Cuota mínima por pata individual.
+     * Solo se incluyen en el pool picks con cuota >= este valor.
+     * Si es null no se aplica filtro adicional (usa el mínimo interno del sistema).
+     */
+    private Double cuotaMinimaPorPata;
+
+    /**
      * Categorías a incluir (GOLES, CORNERS, TARJETAS, RESULTADO, HANDICAP, MARCADOR_EXACTO).
      * Si viene vacío o null se incluyen todas las apostables.
      */
