@@ -23,11 +23,13 @@ public class Pick {
     private Long id;
 
     @ManyToOne(fetch = FetchType.LAZY)
-    @JoinColumn(name = "id_partido", nullable = false)
+    @JoinColumn(name = "id_partido", nullable = false,
+            foreignKey = @ForeignKey(name = "fk_picks_partido"))
     private Partido partido;
 
     @ManyToOne(fetch = FetchType.LAZY)
-    @JoinColumn(name = "id_analisis")
+    @JoinColumn(name = "id_analisis",
+            foreignKey = @ForeignKey(name = "fk_picks_analisis"))
     private Analisis analisis;
 
     @Column(name = "nombre_mercado", nullable = false)
